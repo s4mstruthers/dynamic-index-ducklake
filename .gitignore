@@ -1,0 +1,45 @@
+# ------------------------------------------------------------------------------
+# Docker / Compose
+# ------------------------------------------------------------------------------
+# Container state
+*.pid
+*.seed
+*.swp
+
+# Logs from containers
+*.log
+docker-compose.override.yml
+
+# ------------------------------------------------------------------------------
+# MinIO
+# ------------------------------------------------------------------------------
+# Internal MinIO store (never commit)
+minio-data/
+
+# ------------------------------------------------------------------------------
+# Postgres
+# ------------------------------------------------------------------------------
+# Database state (never commit)
+pgdata/
+
+# ------------------------------------------------------------------------------
+# General system / dev noise
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+
+# Python (if you use DuckDB via Python)
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# Node / JS projects
+node_modules/
+
+# ------------------------------------------------------------------------------
+# Buckets folder
+# ------------------------------------------------------------------------------
+# Keep fixtures tracked, but ignore large/generated binaries
+buckets/*/*.parquet filter=lfs diff=lfs merge=lfs
+buckets/*/*.csv     filter=lfs diff=lfs merge=lfs
