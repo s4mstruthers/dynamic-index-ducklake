@@ -22,6 +22,8 @@ minio-data/
 # Database state (never commit)
 pgdata/
 
+#ignore the parquets
+owi-dedup/
 # ------------------------------------------------------------------------------
 # General system / dev noise
 # ------------------------------------------------------------------------------
