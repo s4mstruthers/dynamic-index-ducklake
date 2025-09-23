@@ -13,8 +13,7 @@ USE my_ducklake;
 #Importing the data from parquet into duckLake
 con.execute("""
     CREATE TABLE IF NOT EXISTS my_ducklake.data AS
-    FROM 'data_files/metadata_0.parquet'
-    WHERE main_content IS NOT NULL;
+    FROM 'data_files/metadata_0.parquet';
             """)
 
 result = con.execute("""
