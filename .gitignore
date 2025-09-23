@@ -9,13 +9,7 @@
 # Logs from containers
 *.log
 docker-compose.override.yml
-
-# ------------------------------------------------------------------------------
-# MinIO
-# ------------------------------------------------------------------------------
-# Internal MinIO store (never commit)
-minio-data/
-
+FTSDB.duckdb
 # ------------------------------------------------------------------------------
 # Postgres
 # ------------------------------------------------------------------------------
@@ -23,25 +17,9 @@ minio-data/
 pgdata/
 
 #ignore the parquets
-owi-dedup/
+data_files/
 # ------------------------------------------------------------------------------
 # General system / dev noise
 # ------------------------------------------------------------------------------
 # macOS
 .DS_Store
-
-# Python (if you use DuckDB via Python)
-__pycache__/
-*.pyc
-.venv/
-env/
-
-# Node / JS projects
-node_modules/
-
-# ------------------------------------------------------------------------------
-# Buckets folder
-# ------------------------------------------------------------------------------
-# Keep fixtures tracked, but ignore large/generated binaries
-buckets/*/*.parquet filter=lfs diff=lfs merge=lfs
-buckets/*/*.csv     filter=lfs diff=lfs merge=lfs
