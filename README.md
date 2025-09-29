@@ -16,8 +16,3 @@ The centralised structure of DuckLake opens many opportunities to explore in the
 - Does having a centralised multi-table metadata structure have an impact on the accuracy of selective searches with data distributed across multiple nodes?
 - Does using SQL statements to query data lakes open new opportunities for optimisation?
 
-# Running Docker setup
-mkdir -p pgdata minio-data
-docker compose up -d [comment]: <>(-d flag is for detatched mode meaning that the terminal is not attached to their logs)
-[comment]: <> (MinIO console: http://localhost:9001  (login: minioadmin / MinioAdmin!ChangeMe123) )
-[comment]: <> ( S3 endpoint:   http://localhost:9000 )
