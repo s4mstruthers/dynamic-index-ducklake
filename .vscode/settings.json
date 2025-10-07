@@ -1,0 +1,17 @@
+{
+    "sqltools.connections": [
+        {
+            "name": "DuckDB_index",
+            "accessMode": "Read Only",
+            "previewLimit": 50,
+            "driver": "DuckDB"
+        },
+        {
+            "previewLimit": 100,
+            "driver": "DuckDB",
+            "name": "duck_fts",
+            "database": "${workspaceFolder:BachelorThesisGit}/local_index/duck_fts.duckdb"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
+}
