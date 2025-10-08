@@ -36,7 +36,7 @@ def import_data():
     
 def test_import():
     result1 = con.execute(f"""
-                         SHOW TABLES; 
+                         SHOW ALL TABLES; 
                          """).fetch_df()
     print("\nTables in ducklake: \n", result1)
     result2 = con.execute(f"""
@@ -45,7 +45,7 @@ def test_import():
     print("\ndata sample: \n", result2)
 
     result3 = con.execute(f"""
-                         SELECT * FROM my_ducklake.dict LIMIT 2; 
+                         SELECT * FROM my_ducklake.dict LIMIT 100; 
                          """).fetch_df()
     print("\ndict sample: \n", result3)
     result4 = con.execute(f"""
@@ -66,7 +66,7 @@ def cleanup():
     
 def main():
     connect_ducklake()
-    import_data()
+    #import_data()
     test_import()
     cleanup()
 
