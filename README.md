@@ -11,7 +11,7 @@ All indexing data and search structures are stored as Parquet files to allow eff
 
 # Core Components
 
-1. DuckLake Virtual Database
+### DuckLake Virtual Database
 
 	All DuckLake tables are attached via:
 	
@@ -23,58 +23,58 @@ All indexing data and search structures are stored as Parquet files to allow eff
 	
 	`my_ducklake.data` is virtual — it points to metadata_0.parquet.
 
-2. Index Tables
+### Index Tables
 
 	Table	Columns	Purpose
 	dict	termid, term, df	Term dictionary. df = number of documents containing the term.
 	docs	docid, len	Document statistics (number of tokens per doc).
 	postings	termid, docid, tf	Term–document frequency mapping.
 
-3. Indexing Flow
+### Indexing Flow
 
-	The typical process is:
-	1.	Reset & Import Raw Data
-		The `metadata_0.parquet` is imported as `my_ducklake.data`.
-		
-		```
-  		from helper import reset_and_reindex
-		reset_and_reindex(con)
-  		```
-		
-		This:
-			•	Drops all DuckLake tables (dict, docs, postings, data)
-			•	Imports the metadata_0.parquet
-			•	Builds new index Parquet files (dict.parquet, docs.parquet, postings.parquet)
-			•	Imports them back into DuckLake
+**The typical process is:**
+1.	Reset & Import Raw Data
+	The `metadata_0.parquet` is imported as `my_ducklake.data`.
 	
-	2.	Run Tests
+	```
+	from helper import reset_and_reindex
+	reset_and_reindex(con)
+	```
 	
-		`python test.py --mode tests`
-		
-		This executes a non-destructive validation:
-			•	Inserts sample docs
-			•	Modifies them
-			•	Deletes them
-			•	Confirms all counts (df, tf, len) are restored correctly
-			•	Prints a truth table summarizing each subtest
+	This:
+		•	Drops all DuckLake tables (dict, docs, postings, data)
+		•	Imports the metadata_0.parquet
+		•	Builds new index Parquet files (dict.parquet, docs.parquet, postings.parquet)
+		•	Imports them back into DuckLake
+
+2.	Run Tests
+
+	`python test.py --mode tests`
 	
-	3.	Query the Index
-		Use BM25 ranking implemented in fts_tools.py:
-		
-		`python test.py --mode query --q "your search terms" --top 10 --show-content`
-		
-		Example output:
-		
-		Top 5 for query: 'artificial intelligence'
-		 1. docid=42  score=4.832  |  'Artificial intelligence is a branch of computer science...'
-		 2. docid=317 score=3.229  |  'AI applications are found in...'
+	This executes a non-destructive validation:
+		•	Inserts sample docs
+		•	Modifies them
+		•	Deletes them
+		•	Confirms all counts (df, tf, len) are restored correctly
+		•	Prints a truth table summarizing each subtest
+
+3.	Query the Index
+	Use BM25 ranking implemented in fts_tools.py:
 	
+	`python test.py --mode query --q "your search terms" --top 10 --show-content`
 	
-	4.	Inspect Sanity State
+	Example output:
 	
-		`python test.py --mode sanity`
-		
-		Prints table schemas and top 2 rows of each index table for debugging.
+	Top 5 for query: 'artificial intelligence'
+	 1. docid=42  score=4.832  |  'Artificial intelligence is a branch of computer science...'
+	 2. docid=317 score=3.229  |  'AI applications are found in...'
+
+
+4.	Inspect Sanity State
+
+	`python test.py --mode sanity`
+	
+	Prints table schemas and top 2 rows of each index table for debugging.
 
 # Tools Overview
 
