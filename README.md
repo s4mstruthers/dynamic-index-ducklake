@@ -123,7 +123,6 @@ Command	Description
 `python test.py --mode sanity` : Print schema + sample rows for each table
 
 # Important Notes
-- No primary/foreign keys — all consistency is handled manually.
 - DuckLake tables are virtual. They map onto Parquet data files.
 - All index manipulations are transactionally safe (BEGIN/COMMIT managed inside each tool).
 - test.py tests are non-destructive — they insert, modify, and delete test docs, leaving the original state intact.
