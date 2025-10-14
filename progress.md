@@ -27,3 +27,4 @@
 # Next steps
 - cleaning up code removing unnecessary / overcomplicated stuff and make sure I understand everything by adding comments
 - Create a pseudocode for the fts_tools to ensure mathematically I know what is going on.
+- make the 3 speachmark descriptions explaining the logic for every function

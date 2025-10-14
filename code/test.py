@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 import duckdb
 import argparse
-
-from helper import connect_ducklake, test_ducklake, reset_and_reindex, tokenize, get_termid
-from update_tools import insert as insert_doc, delete as delete_doc, modify as modify_doc
+from helper_functions import connect_ducklake, test_ducklake, reset_and_reindex, tokenize, get_termid
+from index_tools import insert as insert_doc, delete as delete_doc, modify as modify_doc
 
 DBPREFIX = "my_ducklake"  # attached database/catalog name
 
@@ -114,7 +113,7 @@ def run_tests():
         tf_map = defaultdict(int)
         for tid, tf in p:
             tf_map[tid] = tf
-        from helper import get_termid
+        from helper_functions import get_termid
         a_id = get_termid(con, "apple")
         b_id = get_termid(con, "banana")
         ok_post = (len(p) == 2) and (tf_map.get(a_id) == 2) and (tf_map.get(b_id) == 1)
