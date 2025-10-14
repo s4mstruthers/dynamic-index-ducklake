@@ -1,5 +1,6 @@
 def create_temp_tables(con):
     create_table_sql = """
+        -- Creating local temp tables which will then get pushed to parquet then imported into ducklake
         -- Creating TEMP table for dict
         CREATE TEMP TABLE dict (
             termid BIGINT,
@@ -22,7 +23,7 @@ def create_temp_tables(con):
         );
     """
     con.execute(create_table_sql)
-    
+
 def test(con):
      tables = con.execute("""
                          SHOW ALL TABLES;
