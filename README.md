@@ -1,18 +1,196 @@
-# BachelorThesis
-Using DuckLake's multi-table cataloging database architecture to perform selective search queries locally on server nodes.
+⸻
 
-# Problem formulation and motivation
-For my bachelor thesis I plan to research the performance of selective searching on distributed data using DuckLake's new cataloging architecture which allows for a centralised method of cataloging metadata in a single multi-table database compared to current architectures which have a single-table catalog database which points to metadata files which then recursively link to numerous files such as a manifest list and manifest file before finally pointing to the data files. These meta-data files across the whole meta-layer often have various file types making it far more complex to query. The centralised approach of using a multi-table catalog database (DuckLake) means that all of the meta-can be stored across relational tables internally in the catalog database, meaning we only need to query a single database (using SQL statements) in order to access data files.
+Bachelor Thesis DuckDB–DuckLake Indexing Framework
 
-Using SQL based catalog transactions provides a simple and structured way of querying a data lake. We can make the catalog database with PostgreSQL or something like DuckDB meaning that we can have data warehouse features such as ACID transactions and Multi-Version Concurrency Control (MVCC) on a data lake using DuckLake.For many years we have optimised multi-table querying and very efficient and optimised solutions have already been implemented and used for years across many systems.
+Overview
 
-The centralised structure of DuckLake opens many opportunities to explore in the Information Retrieval area, and I wish to research the potential of server-side selective search where the client sends a SQL query to the data node and then that node locally performs the selective search instead of the client having to download index files and searching it themselves. I aim to research how this new architecture can be used to for Full Text Search (FTS) by using selective search locally on shards across the distributed nodes. This has the potential to improve on today's infrastructure and optimise Information retrieval by bringing the query to the data instead of bringing the data to the client who then searches limited results locally. I aim to analyse the performance metrics of this new method and compare this approach to standard methods that are being widely used currently.
+This project integrates DuckDB and DuckLake to manage and index text documents efficiently using a combination of:
+	•	Virtual DuckLake tables for document storage
+	•	Python-based indexing tools to generate inverted indexes
+	•	BM25 ranking for query retrieval and search testing
+
+All indexing data and search structures are stored as Parquet files to allow efficient re-importing into DuckLake.
+
+⸻
+
+Directory Structure
+
+BachelorThesisGit/
+│
+├── code/                          # All project logic and scripts
+│   ├── helper.py                  # Core environment setup + DuckLake connection + utility functions
+│   ├── indexing_tools.py          # Builds and imports the index (dict/docs/postings)
+│   ├── update_tools.py            # Insert/modify/delete logic for individual documents
+│   ├── fts_tools.py               # BM25 ranking and query matching functions
+│   └── test.py                    # Main CLI tool for testing, reindexing, and querying
+│
+├── ducklake/                      # DuckLake metadata and data store
+│   ├── metadata_catalog.ducklake  # DuckLake catalog (attached in helper.py)
+│   └── data_files/                # Physical files (virtualized by DuckLake)
+│
+├── parquet/                       # Index storage
+│   ├── metadata_0.parquet         # Source dataset (docid, main_content)
+│   ├── dict.parquet               # Inverted index dictionary (termid, term, df)
+│   ├── docs.parquet               # Document table (docid, len)
+│   └── postings.parquet           # Postings table (termid, docid, tf)
+│
+└── .gitignore
 
 
-# Proposed Research Questions
-- How does a SQL-based transaction structure impact the performance of conducting a selective search with data stored on a single node?
--  How do SQL-based transaction structure impact the performance of conducting a selective search with data distributed across multiple nodes?
--  Does having a centralised multi-table metadata structure have an impact on the accuracy of selective search with data stored on a single node?
-- Does having a centralised multi-table metadata structure have an impact on the accuracy of selective searches with data distributed across multiple nodes?
-- Does using SQL statements to query data lakes open new opportunities for optimisation?
+⸻
 
+Core Components
+
+1. DuckLake Virtual Database
+
+All DuckLake tables are attached via:
+
+connect_ducklake(con)
+
+This attaches the metadata catalog and exposes:
+	•	my_ducklake.data – the main dataset containing (docid, content)
+	•	my_ducklake.dict, my_ducklake.docs, and my_ducklake.postings – created/updated by indexing.
+
+my_ducklake.data is virtual — it points to metadata_0.parquet.
+
+⸻
+
+2. Index Tables
+
+Table	Columns	Purpose
+dict	termid, term, df	Term dictionary. df = number of documents containing the term.
+docs	docid, len	Document statistics (number of tokens per doc).
+postings	termid, docid, tf	Term–document frequency mapping.
+
+
+⸻
+
+3. Indexing Flow
+
+The typical process is:
+	1.	Reset & Import Raw Data
+The metadata_0.parquet is imported as my_ducklake.data.
+
+from helper import reset_and_reindex
+reset_and_reindex(con)
+
+This:
+	•	Drops all DuckLake tables (dict, docs, postings, data)
+	•	Imports the metadata_0.parquet
+	•	Builds new index Parquet files (dict.parquet, docs.parquet, postings.parquet)
+	•	Imports them back into DuckLake
+
+	2.	Run Tests
+
+python test.py --mode tests
+
+This executes a non-destructive validation:
+	•	Inserts sample docs
+	•	Modifies them
+	•	Deletes them
+	•	Confirms all counts (df, tf, len) are restored correctly
+	•	Prints a truth table summarizing each subtest
+
+	3.	Query the Index
+Use BM25 ranking implemented in fts_tools.py:
+
+python test.py --mode query --q "your search terms" --top 10 --show-content
+
+Example output:
+
+Top 5 for query: 'artificial intelligence'
+ 1. docid=42  score=4.832  |  'Artificial intelligence is a branch of computer science...'
+ 2. docid=317 score=3.229  |  'AI applications are found in...'
+
+
+	4.	Inspect Sanity State
+
+python test.py --mode sanity
+
+Prints table schemas and top 2 rows of each index table for debugging.
+
+⸻
+
+Tools Overview
+
+helper.py
+	•	Connects DuckLake and installs extensions.
+	•	Contains tokenization (via spaCy).
+	•	Exposes metric helpers (get_df, get_freq, get_dl, etc.).
+	•	Implements reset_and_reindex() for a full rebuild cycle.
+
+indexing_tools.py
+	•	Builds inverted index (dict/docs/postings) in memory using Pandas.
+	•	Writes 3 Parquet files: dict.parquet, docs.parquet, postings.parquet.
+	•	Imports those files as DuckLake tables.
+
+update_tools.py
+	•	Handles dynamic updates (without relying on PK/FK or cascades).
+	•	Functions:
+	•	insert(con, doc, docid=None)
+	•	modify(con, docid, new_content)
+	•	delete(con, docid)
+	•	Ensures df, tf, and document lengths stay consistent.
+
+fts_tools.py
+	•	Implements BM25 retrieval:
+	•	idf() – inverse document frequency
+	•	tf() – term weighting
+	•	bm25_score() – computes document–query score
+	•	match_bm25() – returns ranked top-n matches
+
+test.py
+	•	CLI driver for all operations:
+	•	--mode tests → runs structured correctness tests (with truth table)
+	•	--mode reindex → rebuilds index from Parquet
+	•	--mode query → run BM25 query
+	•	--mode sanity → inspect DuckLake structure
+
+⸻
+
+Command Reference
+
+Command	Description
+python test.py --mode tests	Run insert/modify/delete integrity tests
+python test.py --mode reindex --parquet metadata_0.parquet --limit 5000	Reset + rebuild index (limit optional)
+python test.py --mode query --q "machine learning" --top 5 --show-content	Run BM25 ranking query
+python test.py --mode sanity	Print schema + sample rows for each table
+
+
+⸻
+
+Expected File State After Reindex
+
+After a successful reindex, your /parquet directory will contain exactly four files:
+
+parquet/
+├── metadata_0.parquet   # Original data (imported into my_ducklake.data)
+├── index/
+    ├── dict.parquet         # Inverted index dictionary
+    ├── docs.parquet         # Document statistics
+    └── postings.parquet     # Posting list (term-doc-frequency mapping)
+
+
+⸻
+
+Important Notes
+	•	No primary/foreign keys — all consistency is handled manually.
+	•	DuckLake tables are virtual. They map onto Parquet data files.
+	•	All index manipulations are transactionally safe (BEGIN/COMMIT managed inside each tool).
+	•	test.py tests are non-destructive — they insert, modify, and delete test docs, leaving the original state intact.
+
+⸻
+
+Example Usage Flow
+
+# 1. Full rebuild from base metadata
+python test.py --mode reindex --parquet metadata_0.parquet --limit 1000
+
+# 2. Verify structure
+python test.py --mode sanity
+
+# 3. Run query
+python test.py --mode query --q "artificial intelligence" --top 5 --show-content
+
+# 4. Run correctness tests
+python test.py --mode tests
