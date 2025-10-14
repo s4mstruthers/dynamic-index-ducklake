@@ -114,13 +114,13 @@ All indexing data and search structures are stored as Parquet files to allow eff
 # Command Reference
 
 Command	Description
-`python test.py --mode tests`	Run insert/modify/delete integrity tests
+`python test.py --mode tests` :	Run insert/modify/delete integrity tests
 
-`python test.py --mode reindex --parquet metadata_0.parquet --limit 5000`	Reset + rebuild index (limit optional)
+`python test.py --mode reindex --parquet metadata_0.parquet --limit 5000` : Reset + rebuild index (limit optional)
 
-`python test.py --mode query --q "machine learning" --top 5 --show-content`	Run BM25 ranking query
+`python test.py --mode query --q "machine learning" --top 5 --show-content`	: Run BM25 ranking query
 
-`python test.py --mode sanity	Print schema + sample rows for each table`
+`python test.py --mode sanity` : Print schema + sample rows for each table
 
 # Important Notes
 	•	No primary/foreign keys — all consistency is handled manually.
