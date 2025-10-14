@@ -9,29 +9,6 @@ This project integrates DuckDB and DuckLake to manage and index text documents e
 
 All indexing data and search structures are stored as Parquet files to allow efficient re-importing into DuckLake.
 
-# Directory Structure
-
-BachelorThesisGit/
-│
-├── code/                          # All project logic and scripts
-│   ├── helper.py                  # Core environment setup + DuckLake connection + utility functions
-│   ├── indexing_tools.py          # Builds and imports the index (dict/docs/postings)
-│   ├── update_tools.py            # Insert/modify/delete logic for individual documents
-│   ├── fts_tools.py               # BM25 ranking and query matching functions
-│   └── test.py                    # Main CLI tool for testing, reindexing, and querying
-│
-├── ducklake/                      # DuckLake metadata and data store
-│   ├── metadata_catalog.ducklake  # DuckLake catalog (attached in helper.py)
-│   └── data_files/                # Physical files (virtualized by DuckLake)
-│
-├── parquet/                       # Index storage
-│   ├── metadata_0.parquet         # Source dataset (docid, main_content)
-│   ├── dict.parquet               # Inverted index dictionary (termid, term, df)
-│   ├── docs.parquet               # Document table (docid, len)
-│   └── postings.parquet           # Postings table (termid, docid, tf)
-│
-└── .gitignore
-
 # Core Components
 
 1. DuckLake Virtual Database
@@ -141,18 +118,6 @@ Command	Description
 `python test.py --mode reindex --parquet metadata_0.parquet --limit 5000`	Reset + rebuild index (limit optional)
 `python test.py --mode query --q "machine learning" --top 5 --show-content`	Run BM25 ranking query
 `python test.py --mode sanity	Print schema + sample rows for each table`
-
-
-# Expected File State After Reindex
-
-After a successful reindex, your /parquet directory will contain exactly four files:
-
-parquet/
-├── metadata_0.parquet   # Original data (imported into my_ducklake.data)
-└── index/
-    ├── dict.parquet         # Inverted index dictionary
-    ├── docs.parquet         # Document statistics
-    └── postings.parquet     # Posting list (term-doc-frequency mapping)
 
 # Important Notes
 	•	No primary/foreign keys — all consistency is handled manually.
