@@ -21,7 +21,9 @@
 - non-incremental dynamic text collections index policy: allows full range of update operations (insertstions, deletions and modifications). Lazy deletion procedure does not remove obselete postings from the index immediately but instead merely marks them as deleted.
 	- I believe that this is similar to how ducklake works where changes aren't pushed immediately but instead stored as transactions in metadata waiting for a push.
 
-# Next
-
 - Create an indexing algorithm that will create the same index as what currently have
 - Create the DELETE, INSERT, and MODIFY tools 
+
+# Next steps
+- cleaning up code removing unnecessary / overcomplicated stuff and make sure I understand everything by adding comments
+- Create a pseudocode for the fts_tools to ensure mathematically I know what is going on.
