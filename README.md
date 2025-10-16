@@ -217,14 +217,23 @@ project_root/
 │   ├── index_tools.py
 │   ├── fts_tools.py
 │   ├── test.py
-│   ├── extra/
-│   │   ├── metadata_0.parquet
-│   │   └── metadata_1.parquet
-│   ├── ducklake_data/
-│   │   ├── dict.parquet
-│   │   ├── docs.parquet
-│   │   ├── postings.parquet
+│   ├── ducklake/
+│   │   ├── data_files/
+|   |   |   ├── data/
+|   |   |   ├── dict/
+|   |   |   ├── docs/
+|   |   |   ├── postings/
 │   │   └── metadata_catalog.ducklake
+│   ├── parquet/
+│   |   ├── index/
+│   │   |   ├── dict.parquet
+│   │   |   ├── docs.parquet
+│   │   |   ├── postings.parquet
+│   │   ├── webcrawl_data/
+|   |   |   ├── metadata_0.parquet
+|   |   |   ├── metadata_1.parquet
+|   |   |   ├── ...
+
 ```
 
 ---
