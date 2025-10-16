@@ -13,26 +13,37 @@ PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 # ---------------------------------------------------------------------
 # DuckLake attach / extensions
 # ---------------------------------------------------------------------
+import os
+
 def connect_ducklake(con):
     """
     Attach the DuckLake catalog as `my_ducklake` and load required extensions.
+    If the metadata catalog doesn't exist, create it first.
 
     Notes:
-    - Uses f-strings for ATTACH only because DuckDB parameter binding is limited
-      for some DDL statements. The paths come from constants (not user input).
-    - Does NOT call `USE my_ducklake` here; callers can decide their default schema.
+    - Automatically creates the metadata catalog if missing.
+    - Uses f-strings only for controlled paths (constants).
     """
-    sql = f"""
-        INSTALL ducklake;
-        LOAD ducklake;
+    # Ensure DuckLake extension is available
+    con.execute("INSTALL ducklake; LOAD ducklake;")
 
-        ATTACH 'ducklake:{DUCKLAKE_METADATA.as_posix()}'
-          AS my_ducklake (DATA_PATH '{DUCKLAKE_DATA.as_posix()}');
+    # Ensure FTS extension is available (if you use it)
+    con.execute("INSTALL fts; LOAD fts;")
 
-        INSTALL fts;
-        LOAD fts;
-    """
-    con.execute(sql)
+    metadata_path = DUCKLAKE_METADATA.as_posix()
+    data_path = DUCKLAKE_DATA.as_posix()
+
+    # Create the DuckLake catalog if it doesn't exist
+    if not os.path.exists(metadata_path):
+        print(f"[INFO] Creating new DuckLake catalog at {metadata_path}")
+        con.execute(
+            f"CREATE DUCKLAKE '{metadata_path}' (DATA_PATH '{data_path}');"
+        )
+
+    # Attach the existing (or just-created) catalog
+    con.execute(
+        f"ATTACH 'ducklake:{metadata_path}' AS my_ducklake (DATA_PATH '{data_path}');"
+    )
 
 # ---------------------------------------------------------------------
 # Sanity inspection (still useful during development)

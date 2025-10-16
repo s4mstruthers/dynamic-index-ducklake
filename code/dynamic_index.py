@@ -14,7 +14,7 @@ from helper_functions import (
 from fts_tools import run_bm25_query
 
 # Index operations
-from index_tools import reindex, delete  # add delete import
+from index_tools import reindex, delete
 # Testing
 from test import run_tests  # type: ignore
 
@@ -42,15 +42,18 @@ def _parse_days(value):
 def run_test():
     run_tests()
 
+
 def run_sanity():
     con = duckdb.connect()
     connect_ducklake(con)
     test_ducklake(con)
 
-def run_query(query, top_n=10, show_content=False, qtype="disjunctive", scale=False):
+
+def run_query(query, top_n=10, show_content=False, qtype="disjunctive"):
     con = duckdb.connect()
     connect_ducklake(con)
-    run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype, scale=scale)
+    run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype)
+
 
 def run_import(parquet):
     """Upsert content only (DuckLake MERGE). Does NOT rebuild the index."""
@@ -58,6 +61,7 @@ def run_import(parquet):
     connect_ducklake(con)
     import_data(con, parquet)
     print(f"Upserted data from {parquet} into my_ducklake.main.data (no index rebuild).")
+
 
 def run_initialise(parquet, limit):
     """Drop/recreate my_ducklake.data from the source parquet (with optional limit), then rebuild dict/docs/postings."""
@@ -68,6 +72,7 @@ def run_initialise(parquet, limit):
     reindex(con)
     print(f"Initialised data from {parquet} (limit={limit}) and reindexed.")
 
+
 def run_reindex():
     """Rebuild dict/docs/postings from current my_ducklake.data."""
     con = duckdb.connect()
@@ -75,15 +80,18 @@ def run_reindex():
     reindex(con)
     print("Reindexed from current my_ducklake.main.data.")
 
+
 def run_cleanup(older_than_days=7, dry_run=True, all_files=False):
     con = duckdb.connect()
     connect_ducklake(con)
     cleanup_old_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
 
+
 def run_cleanup_orphans(older_than_days=7, dry_run=True, all_files=False):
     con = duckdb.connect()
     connect_ducklake(con)
     cleanup_orphaned_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
+
 
 def run_delete(docid):
     """
@@ -147,11 +155,6 @@ if __name__ == "__main__":
         type=int,
         help="Document ID (required for --mode delete).",
     )
-    ap.add_argument(
-        "--scale",
-        action="store_true",
-        help="Scale BM25 scores to 0–10 instead of showing raw values.",
-    )
     args = ap.parse_args()
 
     if args.mode == "test":
@@ -161,7 +164,7 @@ if __name__ == "__main__":
     elif args.mode == "query":
         if not args.query:
             raise SystemExit("ERROR: provide --q 'your query'")
-        run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype, scale=args.scale)
+        run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype)
     elif args.mode == "import":
         run_import(args.parquet)
     elif args.mode == "initialise":
