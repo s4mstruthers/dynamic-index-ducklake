@@ -49,7 +49,7 @@ This:
 
 2.	Run Tests
 
-	`python test.py --mode tests`
+	`python dynamic_index.py --mode tests`
 	
 	This executes a non-destructive validation:
 	- Inserts sample docs
@@ -61,7 +61,7 @@ This:
 3.	Query the Index
 	Use BM25 ranking implemented in fts_tools.py:
 	
-	`python test.py --mode query --q "your search terms" --top 10 --show-content`
+	`python dynamic_index.py --mode query --q "your search terms" --top 10 --show-content`
 	
 	Example output:
 	
@@ -72,7 +72,7 @@ This:
 
 4.	Inspect Sanity State
 
-	`python test.py --mode sanity`
+	`python dynamic_index.py --mode sanity`
 	
 	Prints table schemas and top 2 rows of each index table for debugging.
 
@@ -104,7 +104,7 @@ This:
 	- bm25_score() – computes document–query score
 	- match_bm25() – returns ranked top-n matches
 
-`test.py`
+`dynamic_index.py`
 	- CLI driver for all operations:
 	- --mode tests → runs structured correctness tests (with truth table)
 	- --mode reindex → rebuilds index from Parquet
@@ -114,13 +114,13 @@ This:
 # Command Reference
 
 Command	Description
-`python test.py --mode tests` :	Run insert/modify/delete integrity tests
+`python dynamic_index.py --mode tests` :	Run insert/modify/delete integrity tests
 
-`python test.py --mode reindex --parquet metadata_0.parquet --limit 5000` : Reset + rebuild index (limit optional)
+`python dynamic_index.py --mode reindex --parquet metadata_0.parquet --limit 5000` : Reset + rebuild index (limit optional)
 
-`python test.py --mode query --q "machine learning" --top 5 --show-content`	: Run BM25 ranking query
+`python dynamic_index.py --mode query --q "machine learning" --top 5 --show-content`	: Run BM25 ranking query
 
-`python test.py --mode sanity` : Print schema + sample rows for each table
+`python dynamic_index.py --mode sanity` : Print schema + sample rows for each table
 
 # Important Notes
 - DuckLake tables are virtual. They map onto Parquet data files.
@@ -130,13 +130,13 @@ Command	Description
 # Example Usage Flow
 
 1. Full rebuild from base metadata
-`python test.py --mode reindex --parquet metadata_0.parquet --limit 1000`
+`python dynamic_index.py --mode reindex --parquet metadata_0.parquet --limit 1000`
 
 2. Verify structure
-`python test.py --mode sanity`
+`python dynamic_index.py --mode sanity`
 
 3. Run query
-`python test.py --mode query --q "artificial intelligence" --top 5 --show-content`
+`python dynamic_index.py --mode query --q "artificial intelligence" --top 5 --show-content`
 
 4. Run correctness tests
-`python test.py --mode tests`
+`python dynamic_index.py --mode tests`
