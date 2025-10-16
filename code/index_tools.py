@@ -1,6 +1,5 @@
+# index_tools.py
 from collections import Counter, defaultdict
-from pathlib import Path
-import pandas as pd
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -25,7 +24,6 @@ PARQ_POST = PARQ_DIR / "postings.parquet"
 def _ensure_dirs():
     PARQ_DIR.mkdir(parents=True, exist_ok=True)
 
-
 def _iter_data(con):
     """
     Stream (docid, content) rows from my_ducklake.main.data.
@@ -38,73 +36,19 @@ def _iter_data(con):
         batch = fetch(BATCH_SIZE)
         if not batch:
             break
-        # fast tuple-unpack in Python loop
         for docid, content in batch:
             yield docid, content
 
-def _build_index(rows):
-    """
-    Python inverted index. Returns three plain lists of tuples:
-      dict_rows:    [(termid, term, df)]
-      docs_rows:    [(docid, len)]
-      postings_rows:[(termid, docid, tf)]
-    """
-    term_to_id = {}
-    df_counter = defaultdict(int)
-    docs_table = []
-    postings_table = []
-
-    next_tid = 1
-    append_doc = docs_table.append
-    append_post = postings_table.append
-
-    # First pass: assign ids (arrival order), collect postings and df
-    for docid, content in rows:
-        text = "" if content is None else str(content)
-        tokens = tokenize(text)
-
-        append_doc((docid, len(tokens)))
-        if not tokens:
-            continue
-
-        tf = Counter(tokens)
-        for term, freq in tf.items():
-            tid = term_to_id.setdefault(term, next_tid)
-            if tid == next_tid:
-                next_tid += 1
-            append_post((tid, docid, freq))
-
-        # iterate keys directly (no .keys())
-        for term in tf:
-            df_counter[term_to_id[term]] += 1
-
-    # Optional second pass to make termids deterministic by term order
-    if DETERMINISTIC_TERMIDS:
-        # remap TIDs by lexicographic order of terms
-        sorted_terms = sorted(term_to_id.keys())
-        remap = {term_to_id[t]: i+1 for i, t in enumerate(sorted_terms)}
-        # remap postings
-        postings_table = [(remap[tid], docid, tf) for (tid, docid, tf) in postings_table]
-        # rebuild df_counter under new ids
-        df_counter = defaultdict(int, {remap[tid]: df_counter[tid] for tid in df_counter})
-        # rebuild dict_table deterministically
-        dict_table = [(i+1, t, df_counter.get(i+1, 0)) for i, t in enumerate(sorted_terms)]
-    else:
-        # build dict_table as encountered
-        dict_table = [(tid, term, df_counter.get(tid, 0)) for term, tid in term_to_id.items()]
-
-    return dict_table, docs_table, postings_table
-
 # --------------- public API ----------------
-
 def build_index_to_parquet_from_ducklake(con):
     """
-    Stream ALL rows from my_ducklake.main.data, build index,
-    and write Parquet incrementally (docs/postings). The dict is finalized at end.
+    Stream ALL rows from my_ducklake.main.data and write:
+      - docs.parquet incrementally (docid, len)
+      - postings.parquet incrementally (termid, docid, tf)
+      - dict.parquet at the end from in-memory term map + df counts
 
     Memory profile: O(#distinct terms) + O(buffer sizes), not O(#postings).
     """
-
     _ensure_dirs()
 
     # Remove old files first to guarantee single file per artifact
@@ -120,17 +64,13 @@ def build_index_to_parquet_from_ducklake(con):
     next_tid = 1
 
     # --------- postings/doc buffers ----------
-    docs_docid_buf = []
-    docs_len_buf = []
+    docs_docid_buf, docs_len_buf = [], []
     docs_rows_in_buf = 0
 
-    post_tid_buf = []
-    post_docid_buf = []
-    post_tf_buf = []
+    post_tid_buf, post_docid_buf, post_tf_buf = [], [], []
     post_rows_in_buf = 0
 
     # --------- Parquet writers (streaming) ----------
-    # docs schema
     docs_schema = pa.schema([
         pa.field("docid", pa.int64()),
         pa.field("len", pa.int64()),
@@ -142,7 +82,6 @@ def build_index_to_parquet_from_ducklake(con):
         write_statistics=True
     )
 
-    # postings schema
     post_schema = pa.schema([
         pa.field("termid", pa.int64()),
         pa.field("docid", pa.int64()),
@@ -163,6 +102,7 @@ def build_index_to_parquet_from_ducklake(con):
     append_post_tf  = post_tf_buf.append
     tokenize_fn = tokenize
     setdefault = dict.setdefault
+    import numpy as _np  # local alias for fast array creation
 
     # --------- loop over data ----------
     for docid, content in _iter_data(con):
@@ -178,14 +118,13 @@ def build_index_to_parquet_from_ducklake(con):
         if docs_rows_in_buf >= DOCS_FLUSH_ROWS:
             table = pa.Table.from_arrays(
                 [
-                    pa.array(np.asarray(docs_docid_buf, dtype=np.int64)),
-                    pa.array(np.asarray(docs_len_buf, dtype=np.int64)),
+                    pa.array(_np.asarray(docs_docid_buf, dtype=_np.int64)),
+                    pa.array(_np.asarray(docs_len_buf, dtype=_np.int64)),
                 ],
                 schema=docs_schema
             )
             docs_writer.write_table(table)
-            docs_docid_buf.clear()
-            docs_len_buf.clear()
+            docs_docid_buf.clear(); docs_len_buf.clear()
             docs_rows_in_buf = 0
 
         # empty doc? skip postings
@@ -212,16 +151,14 @@ def build_index_to_parquet_from_ducklake(con):
         if post_rows_in_buf >= POSTINGS_FLUSH_ROWS:
             table = pa.Table.from_arrays(
                 [
-                    pa.array(np.asarray(post_tid_buf, dtype=np.int64)),
-                    pa.array(np.asarray(post_docid_buf, dtype=np.int64)),
-                    pa.array(np.asarray(post_tf_buf, dtype=np.int64)),
+                    pa.array(_np.asarray(post_tid_buf, dtype=_np.int64)),
+                    pa.array(_np.asarray(post_docid_buf, dtype=_np.int64)),
+                    pa.array(_np.asarray(post_tf_buf, dtype=_np.int64)),
                 ],
                 schema=post_schema
             )
             post_writer.write_table(table)
-            post_tid_buf.clear()
-            post_docid_buf.clear()
-            post_tf_buf.clear()
+            post_tid_buf.clear(); post_docid_buf.clear(); post_tf_buf.clear()
             post_rows_in_buf = 0
 
     # --------- final flushes ----------
@@ -251,18 +188,14 @@ def build_index_to_parquet_from_ducklake(con):
 
     # --------- build/write dict.parquet (small) ----------
     if DETERMINISTIC_TERMIDS:
-        # stable: sort by term, remap ids
         sorted_terms = sorted(term_to_id.keys())
         remap = {term_to_id[t]: i + 1 for i, t in enumerate(sorted_terms)}
-        # rebuild df under new ids
         df_counter = defaultdict(int, {remap[tid]: df_counter[tid] for tid in df_counter})
         termids = np.asarray([i + 1 for i in range(len(sorted_terms))], dtype=np.int64)
         terms = pa.array(sorted_terms, type=pa.string())
         dfs = np.asarray([df_counter.get(i + 1, 0) for i in range(len(sorted_terms))], dtype=np.int64)
     else:
-        # fast: arrival order
         items = list(term_to_id.items())  # (term, tid)
-        # unpack into aligned arrays
         terms_list = [t for t, _ in items]
         termids = np.asarray([tid for _, tid in items], dtype=np.int64)
         terms = pa.array(terms_list, type=pa.string())
@@ -277,7 +210,7 @@ def build_index_to_parquet_from_ducklake(con):
         where=str(PARQ_DICT),
         compression=PARQUET_COMPRESSION,
         write_statistics=True,
-        use_dictionary=True  # encode all suitable columns
+        use_dictionary=True
     )
 
 def import_index_parquets_into_ducklake(con):
@@ -323,7 +256,6 @@ def reindex(con):
       - Replace DuckLake tables from those Parquets
     """
     import os
-    # Let DuckDB parallelize downstream ops safely
     threads = max(1, (os.cpu_count() or 1))
     con.execute(f"PRAGMA threads={threads};")
 
@@ -331,16 +263,13 @@ def reindex(con):
     import_index_parquets_into_ducklake(con)
 
 # ----------------------- Update tools -------------------------------
-# (unchanged below, but see NOTE on df overcount for insert with existing docid)
-
 def delete(con, docid):
     """
-    Delete one document (docid) and maintain df counts, using lightweight
-    UPDATE/DELETE and a tiny temp table to avoid heavy MERGE buffers.
+    Delete one document (docid) and maintain df counts using a small temp table,
+    avoiding heavy MERGE buffers.
     """
     con.execute("BEGIN")
     try:
-        # (1) Collect the affected termids for this doc into a tiny temp table.
         con.execute("DROP TABLE IF EXISTS touched_termids")
         con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT)")
         con.execute(
@@ -349,32 +278,23 @@ def delete(con, docid):
             [docid],
         )
 
-        # (2) Decrement df for just those termids.
-        con.execute(
-            """
+        con.execute("""
             UPDATE my_ducklake.dict
             SET df = CASE WHEN df > 0 THEN df - 1 ELSE 0 END
             WHERE termid IN (SELECT termid FROM touched_termids)
-            """
-        )
+        """)
 
-        # (3) Remove terms whose df is now zero (only among touched termids).
-        con.execute(
-            """
+        con.execute("""
             DELETE FROM my_ducklake.dict
             WHERE df = 0
               AND termid IN (SELECT termid FROM touched_termids)
-            """
-        )
+        """)
 
-        # (4) Delete postings/docs/data for the doc.
         con.execute("DELETE FROM my_ducklake.postings WHERE docid = ?", [docid])
         con.execute("DELETE FROM my_ducklake.docs      WHERE docid = ?", [docid])
         con.execute("DELETE FROM my_ducklake.data      WHERE docid = ?", [docid])
 
-        # (5) Clean up temp.
         con.execute("DROP TABLE IF EXISTS touched_termids")
-
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")

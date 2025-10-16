@@ -47,10 +47,10 @@ def run_sanity():
     connect_ducklake(con)
     test_ducklake(con)
 
-def run_query(query, top_n=10, show_content=False, qtype="disjunctive"):
+def run_query(query, top_n=10, show_content=False, qtype="disjunctive", scale=False):
     con = duckdb.connect()
     connect_ducklake(con)
-    run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype)
+    run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype, scale=scale)
 
 def run_import(parquet):
     """Upsert content only (DuckLake MERGE). Does NOT rebuild the index."""
@@ -147,6 +147,11 @@ if __name__ == "__main__":
         type=int,
         help="Document ID (required for --mode delete).",
     )
+    ap.add_argument(
+        "--scale",
+        action="store_true",
+        help="Scale BM25 scores to 0–10 instead of showing raw values.",
+    )
     args = ap.parse_args()
 
     if args.mode == "test":
@@ -156,7 +161,7 @@ if __name__ == "__main__":
     elif args.mode == "query":
         if not args.query:
             raise SystemExit("ERROR: provide --q 'your query'")
-        run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype)
+        run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype, scale=args.scale)
     elif args.mode == "import":
         run_import(args.parquet)
     elif args.mode == "initialise":

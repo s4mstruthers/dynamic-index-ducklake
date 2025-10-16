@@ -2,6 +2,23 @@
 
 from helper_functions import tokenize_query
 
+# normalise the result to a scale of 0-10
+def _scale_to_0_10(results):
+    """
+    Min-max scale a list of (docid, score) to the range [0, 10].
+    - If all scores are identical:
+        * if score > 0 -> set all to 10.0
+        * else -> set all to 0.0
+    """
+    if not results:
+        return []
+    scores = [s for _, s in results]
+    lo, hi = min(scores), max(scores)
+    if hi == lo:
+        val = 10.0 if hi > 0 else 0.0
+        return [(d, val) for d, _ in results]
+    scale = 10.0 / (hi - lo)
+    return [(d, (s - lo) * scale) for d, s in results]
 
 def conjunctive_bm25(con, query, top_n):
     """
@@ -175,25 +192,30 @@ def disjunctive_bm25(con, query, top_n):
 # -----------------------
 # Query helpers (BM25)
 # -----------------------
-def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"):
+def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive", scale=True):
     """
-    Execute a BM25 query (conjunctive/disjunctive) and print a ranked list.
-    This keeps dynamic_index.py thin.
+    Execute a BM25 query (conjunctive/disjunctive).
+    Optionally scale scores to 0–10 if scale=True.
     """
-    # pick implementation lazily to avoid importing both
     if qtype == "conjunctive":
         from fts_tools import conjunctive_bm25 as bm25_runner
     else:
         from fts_tools import disjunctive_bm25 as bm25_runner
 
-    results = bm25_runner(con, query, top_n)
-    if not results:
+    raw_results = bm25_runner(con, query, top_n)
+    if not raw_results:
         print("No results.")
         return
 
-    print(f"Top {len(results)} for {qtype} BM25 query: {query!r}")
+    if scale:
+        results = _scale_to_0_10(raw_results)
+        print(f"Top {len(results)} for {qtype} BM25 query: {query!r} (scores scaled 0–10)")
+    else:
+        results = raw_results
+        print(f"Top {len(results)} for {qtype} BM25 query: {query!r} (raw BM25 scores)")
+
     for rank, (docid, score) in enumerate(results, 1):
-        line = f"{rank:2d}. docid={docid}  score={score:.6f}"
+        line = f"{rank:2d}. docid={docid}  score={score:0.2f}"
         if show_content:
             row = con.execute(
                 "SELECT content FROM my_ducklake.data WHERE docid = ?", (docid,)
