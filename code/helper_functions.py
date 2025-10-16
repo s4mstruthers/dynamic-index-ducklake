@@ -47,22 +47,28 @@ def connect_ducklake(con):
 # ---------------------------------------------------------------------
 def test_ducklake(con):
     """
-    Print schema (DESCRIBE) and top-2 rows for each index table in `my_ducklake`.
+    Schema + sample rows + storage diagnostics for DuckLake tables.
+    Helps explain large on-disk size by listing fragments and snapshots.
     """
-    describe = con.execute("DESCRIBE my_ducklake.dict;").fetch_df()
+    con.execute("USE my_ducklake")
+
+    # ---------------- Schema + top-2 -------------------------------
+    describe = con.execute("DESCRIBE my_ducklake.dict").fetch_df()
     print("Describe dict:\n", describe, "\n")
-    top_dict = con.execute("SELECT * FROM my_ducklake.dict LIMIT 2;").fetch_df()
+    top_dict = con.execute("SELECT * FROM my_ducklake.dict LIMIT 2").fetch_df()
     print("Top 2 rows in dict:\n", top_dict, "\n")
 
-    describe = con.execute("DESCRIBE my_ducklake.docs;").fetch_df()
+    describe = con.execute("DESCRIBE my_ducklake.docs").fetch_df()
     print("Describe docs:\n", describe, "\n")
-    top_docs = con.execute("SELECT * FROM my_ducklake.docs LIMIT 2;").fetch_df()
+    top_docs = con.execute("SELECT * FROM my_ducklake.docs LIMIT 2").fetch_df()
     print("Top 2 rows in docs:\n", top_docs, "\n")
 
-    describe = con.execute("DESCRIBE my_ducklake.postings;").fetch_df()
+    describe = con.execute("DESCRIBE my_ducklake.postings").fetch_df()
     print("Describe postings:\n", describe, "\n")
-    top_post = con.execute("SELECT * FROM my_ducklake.postings LIMIT 2;").fetch_df()
+    top_post = con.execute("SELECT * FROM my_ducklake.postings LIMIT 2").fetch_df()
     print("Top 2 rows in postings:\n", top_post, "\n")
+
+    
 
 # ---------------------------------------------------------------------
 # Lookups used by tokenize_query (the only per-term lookup we still need)
@@ -177,3 +183,70 @@ def import_data(con, parquet):
         """,
         [src],
     )
+
+# -----------------------
+# DuckLake maintenance: cleanup
+# -----------------------
+def cleanup_old_files(con, older_than_days=7, dry_run=True, all_files=False):
+    """
+    Delete files that DuckLake has scheduled for deletion (expired snapshots).
+    Safer default: dry_run=True. Set all_files=True to ignore the 'older_than' filter.
+    """
+    try:
+        days = int(older_than_days)
+        if days <= 0:
+            raise ValueError
+    except Exception:
+        raise SystemExit("ERROR: older_than_days must be a positive integer (days).")
+    interval = f"{days} days"
+
+    con.execute("USE my_ducklake")
+
+    if all_files:
+        con.execute("CALL ducklake_cleanup_old_files('my_ducklake', cleanup_all => true)")
+        print("Cleanup (scheduled-for-deletion, ALL files) executed.")
+        return
+
+    if dry_run:
+        con.execute(
+            f"CALL ducklake_cleanup_old_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
+        )
+        print(f"Cleanup DRY RUN (scheduled-for-deletion, older_than={interval}) listed files.")
+    else:
+        con.execute(
+            f"CALL ducklake_cleanup_old_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
+        )
+        print(f"Cleanup (scheduled-for-deletion, older_than={interval}) executed.")
+
+
+def cleanup_orphaned_files(con, older_than_days=7, dry_run=True, all_files=False):
+    """
+    Delete orphaned files (untracked by DuckLake). Safer default: dry_run=True.
+    Set all_files=True to ignore the 'older_than' filter.
+    """
+    try:
+        days = int(older_than_days)
+        if days <= 0:
+            raise ValueError
+    except Exception:
+        raise SystemExit("ERROR: older_than_days must be a positive integer (days).")
+    interval = f"{days} days"
+
+    con.execute("USE my_ducklake")
+
+    if all_files:
+        con.execute("CALL ducklake_delete_orphaned_files('my_ducklake', cleanup_all => true)")
+        print("Cleanup (orphans, ALL files) executed.")
+        return
+
+    if dry_run:
+        con.execute(
+            f"CALL ducklake_delete_orphaned_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
+        )
+        print(f"Cleanup DRY RUN (orphans, older_than={interval}) listed files.")
+    else:
+        con.execute(
+            f"CALL ducklake_delete_orphaned_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
+        )
+        print(f"Cleanup (orphans, older_than={interval}) executed.")
+

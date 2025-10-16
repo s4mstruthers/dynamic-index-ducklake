@@ -171,3 +171,34 @@ def disjunctive_bm25(con, query, top_n):
 
     con.execute("DROP TABLE IF EXISTS query_terms")
     return [(row[0], float(row[1])) for row in rows]
+
+# -----------------------
+# Query helpers (BM25)
+# -----------------------
+def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"):
+    """
+    Execute a BM25 query (conjunctive/disjunctive) and print a ranked list.
+    This keeps dynamic_index.py thin.
+    """
+    # pick implementation lazily to avoid importing both
+    if qtype == "conjunctive":
+        from fts_tools import conjunctive_bm25 as bm25_runner
+    else:
+        from fts_tools import disjunctive_bm25 as bm25_runner
+
+    results = bm25_runner(con, query, top_n)
+    if not results:
+        print("No results.")
+        return
+
+    print(f"Top {len(results)} for {qtype} BM25 query: {query!r}")
+    for rank, (docid, score) in enumerate(results, 1):
+        line = f"{rank:2d}. docid={docid}  score={score:.6f}"
+        if show_content:
+            row = con.execute(
+                "SELECT content FROM my_ducklake.data WHERE docid = ?", (docid,)
+            ).fetchone()
+            if row and row[0] is not None:
+                snippet = str(row[0])[:160].replace("\n", " ")
+                line += f"  |  {snippet!r}"
+        print(line)

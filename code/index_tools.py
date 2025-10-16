@@ -127,10 +127,6 @@ def build_index_to_parquet_from_ducklake(con):
     df_post.to_parquet(PARQ_POST, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
 
 def import_index_parquets_into_ducklake(con):
-    """
-    Materialize the three Parquet files into physical DuckDB tables:
-      my_ducklake.main.dict, my_ducklake.main.docs, my_ducklake.main.postings
-    """
     for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):
         if not p.exists():
             raise FileNotFoundError(f"Missing parquet file: {p}")
@@ -138,7 +134,6 @@ def import_index_parquets_into_ducklake(con):
     con.execute("USE my_ducklake")
     con.execute("BEGIN")
     try:
-        # Faster than DROP + CREATE: use CREATE OR REPLACE TABLE (DuckDB supports it)
         con.execute("""
             CREATE OR REPLACE TABLE dict AS
             SELECT CAST(termid AS BIGINT) AS termid,
@@ -162,12 +157,6 @@ def import_index_parquets_into_ducklake(con):
             FROM read_parquet(?)
         """, [str(PARQ_POST)])
 
-        # (Optional) add secondary indexes for faster query/merge joins
-        con.execute("CREATE INDEX IF NOT EXISTS idx_postings_termid ON postings(termid)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_postings_docid  ON postings(docid)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_docs_docid      ON docs(docid)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_dict_termid     ON dict(termid)")
-
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
@@ -183,7 +172,7 @@ def reindex(con):
     # Let DuckDB parallelize downstream ops safely
     threads = max(1, (os.cpu_count() or 1))
     con.execute(f"PRAGMA threads={threads};")
-    
+
     build_index_to_parquet_from_ducklake(con)
     import_index_parquets_into_ducklake(con)
 
