@@ -170,7 +170,7 @@ def _next_id(con: duckdb.DuckDBPyConnection, table: str, col: str) -> int:
     """
     Return next integer id as (MAX(col)+1) or 1 if empty.
     """
-    return int(con.execute(f"SELECT COALESCE(MAX({col}) + 1, 1) FROM my_ducklake.{table}").fetchone()[0])
+    return int(con.execute(f"SELECT COALESCE(MAX({col}) + 1, 1) FROM my_ducklake.{table}").fetchone()[0]) # type: ignore
 
 
 def _exists(con: duckdb.DuckDBPyConnection, table: str, col: str, val) -> bool:
