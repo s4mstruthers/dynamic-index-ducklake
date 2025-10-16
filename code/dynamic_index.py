@@ -70,6 +70,7 @@ def run_initialise(parquet, limit):
     con = duckdb.connect()
     connect_ducklake(con)
     initialise_data(con, parquet=parquet, limit=limit)
+    print("Data imported into ducklake, now indexing ...")
     reindex(con)
     print(f"Initialised data from {parquet} (limit={limit}) and reindexed.")
 
