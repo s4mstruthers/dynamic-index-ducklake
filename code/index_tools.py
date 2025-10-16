@@ -1,16 +1,17 @@
 from collections import Counter, defaultdict
 from pathlib import Path
 import pandas as pd
-
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 from helper_functions import PARQUET_FOLDER, tokenize
 
-# -------------------------------------------------
-# Tunables
-# -------------------------------------------------
-BATCH_SIZE = 100_000         # tune to your RAM / I/O
-PARQUET_ENGINE = "pyarrow"   # faster than fastparquet typically
-PARQUET_COMPRESSION = "zstd" # smaller and fast; fall back to 'snappy' if needed
-DETERMINISTIC_TERMIDS = False  # if True, termids assigned lexicographically
+# ---- knobs for scale ----
+BATCH_SIZE = 50_000                  # rows per fetchmany from DuckDB
+DOCS_FLUSH_ROWS = 500_000            # rows per Parquet row group for docs
+POSTINGS_FLUSH_ROWS = 2_000_000      # rows per Parquet row group for postings
+PARQUET_COMPRESSION = "zstd"         # good ratio/speed
+DETERMINISTIC_TERMIDS = False        # True = slower, stable termids by lexicographic term order
 
 # -------------------------------------------------------------------
 # Parquet output locations (single files; overwritten on each build)
@@ -21,14 +22,14 @@ PARQ_DOCS = PARQ_DIR / "docs.parquet"
 PARQ_POST = PARQ_DIR / "postings.parquet"
 
 # --------------- helpers -------------------
-
 def _ensure_dirs():
     PARQ_DIR.mkdir(parents=True, exist_ok=True)
 
-#This uses batching to reduce python ducklake roundtrips
+
 def _iter_data(con):
     """
-    Stream (docid, content) rows from my_ducklake.main.data (all rows).
+    Stream (docid, content) rows from my_ducklake.main.data.
+    Uses fetchmany(BATCH_SIZE) to keep round-trips modest.
     """
     con.execute("USE my_ducklake")
     con.execute("SELECT docid, content FROM main.data")
@@ -37,6 +38,7 @@ def _iter_data(con):
         batch = fetch(BATCH_SIZE)
         if not batch:
             break
+        # fast tuple-unpack in Python loop
         for docid, content in batch:
             yield docid, content
 
@@ -97,34 +99,186 @@ def _build_index(rows):
 
 def build_index_to_parquet_from_ducklake(con):
     """
-    1) Stream ALL rows from my_ducklake.main.data
-    2) Build index in memory (pure Python)
-    3) Write single-file Parquets with compression
+    Stream ALL rows from my_ducklake.main.data, build index,
+    and write Parquet incrementally (docs/postings). The dict is finalized at end.
+
+    Memory profile: O(#distinct terms) + O(buffer sizes), not O(#postings).
     """
+
     _ensure_dirs()
 
-    dict_table, docs_table, postings_table = _build_index(_iter_data(con))
+    # Remove old files first to guarantee single file per artifact
+    for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
 
-    # Set explicit dtypes to reduce file size and ensure consistency
-    df_dict = pd.DataFrame(dict_table, columns=["termid", "term", "df"])
-    df_docs = pd.DataFrame(docs_table, columns=["docid", "len"])
-    df_post = pd.DataFrame(postings_table, columns=["termid", "docid", "tf"])
+    # --------- state for dictionary and doc stats ----------
+    term_to_id = {}                  # term -> termid
+    df_counter = defaultdict(int)    # termid -> df
+    next_tid = 1
 
-    # convert integer columns to int64 to avoid mixed dtypes
-    for col in ("termid", "df"):
-        if col in df_dict:
-            df_dict[col] = df_dict[col].astype("int64", copy=False)
-    for col in ("docid", "len"):
-        if col in df_docs:
-            df_docs[col] = df_docs[col].astype("int64", copy=False)
-    for col in ("termid", "docid", "tf"):
-        if col in df_post:
-            df_post[col] = df_post[col].astype("int64", copy=False)
+    # --------- postings/doc buffers ----------
+    docs_docid_buf = []
+    docs_len_buf = []
+    docs_rows_in_buf = 0
 
-    # Write Parquet (overwrite semantics by default)
-    df_dict.to_parquet(PARQ_DICT, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
-    df_docs.to_parquet(PARQ_DOCS, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
-    df_post.to_parquet(PARQ_POST, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
+    post_tid_buf = []
+    post_docid_buf = []
+    post_tf_buf = []
+    post_rows_in_buf = 0
+
+    # --------- Parquet writers (streaming) ----------
+    # docs schema
+    docs_schema = pa.schema([
+        pa.field("docid", pa.int64()),
+        pa.field("len", pa.int64()),
+    ])
+    docs_writer = pq.ParquetWriter(
+        where=str(PARQ_DOCS),
+        schema=docs_schema,
+        compression=PARQUET_COMPRESSION,
+        write_statistics=True
+    )
+
+    # postings schema
+    post_schema = pa.schema([
+        pa.field("termid", pa.int64()),
+        pa.field("docid", pa.int64()),
+        pa.field("tf", pa.int64()),
+    ])
+    post_writer = pq.ParquetWriter(
+        where=str(PARQ_POST),
+        schema=post_schema,
+        compression=PARQUET_COMPRESSION,
+        write_statistics=True
+    )
+
+    # --------- local bindings to reduce attribute lookups ----------
+    append_docs_id = docs_docid_buf.append
+    append_docs_len = docs_len_buf.append
+    append_post_tid = post_tid_buf.append
+    append_post_doc = post_docid_buf.append
+    append_post_tf  = post_tf_buf.append
+    tokenize_fn = tokenize
+    setdefault = dict.setdefault
+
+    # --------- loop over data ----------
+    for docid, content in _iter_data(con):
+        text = "" if content is None else str(content)
+        toks = tokenize_fn(text)
+
+        # docs row
+        append_docs_id(int(docid))
+        append_docs_len(len(toks))
+        docs_rows_in_buf += 1
+
+        # flush docs if needed
+        if docs_rows_in_buf >= DOCS_FLUSH_ROWS:
+            table = pa.Table.from_arrays(
+                [
+                    pa.array(np.asarray(docs_docid_buf, dtype=np.int64)),
+                    pa.array(np.asarray(docs_len_buf, dtype=np.int64)),
+                ],
+                schema=docs_schema
+            )
+            docs_writer.write_table(table)
+            docs_docid_buf.clear()
+            docs_len_buf.clear()
+            docs_rows_in_buf = 0
+
+        # empty doc? skip postings
+        if not toks:
+            continue
+
+        tf = Counter(toks)
+
+        # postings + df
+        for term, freq in tf.items():
+            tid = setdefault(term_to_id, term, next_tid)
+            if tid == next_tid:
+                next_tid += 1
+            append_post_tid(tid)
+            append_post_doc(int(docid))
+            append_post_tf(int(freq))
+            post_rows_in_buf += 1
+
+        # df once per distinct term
+        for term in tf:
+            df_counter[term_to_id[term]] += 1
+
+        # flush postings if needed
+        if post_rows_in_buf >= POSTINGS_FLUSH_ROWS:
+            table = pa.Table.from_arrays(
+                [
+                    pa.array(np.asarray(post_tid_buf, dtype=np.int64)),
+                    pa.array(np.asarray(post_docid_buf, dtype=np.int64)),
+                    pa.array(np.asarray(post_tf_buf, dtype=np.int64)),
+                ],
+                schema=post_schema
+            )
+            post_writer.write_table(table)
+            post_tid_buf.clear()
+            post_docid_buf.clear()
+            post_tf_buf.clear()
+            post_rows_in_buf = 0
+
+    # --------- final flushes ----------
+    if docs_rows_in_buf:
+        table = pa.Table.from_arrays(
+            [
+                pa.array(np.asarray(docs_docid_buf, dtype=np.int64)),
+                pa.array(np.asarray(docs_len_buf, dtype=np.int64)),
+            ],
+            schema=docs_schema
+        )
+        docs_writer.write_table(table)
+
+    if post_rows_in_buf:
+        table = pa.Table.from_arrays(
+            [
+                pa.array(np.asarray(post_tid_buf, dtype=np.int64)),
+                pa.array(np.asarray(post_docid_buf, dtype=np.int64)),
+                pa.array(np.asarray(post_tf_buf, dtype=np.int64)),
+            ],
+            schema=post_schema
+        )
+        post_writer.write_table(table)
+
+    docs_writer.close()
+    post_writer.close()
+
+    # --------- build/write dict.parquet (small) ----------
+    if DETERMINISTIC_TERMIDS:
+        # stable: sort by term, remap ids
+        sorted_terms = sorted(term_to_id.keys())
+        remap = {term_to_id[t]: i + 1 for i, t in enumerate(sorted_terms)}
+        # rebuild df under new ids
+        df_counter = defaultdict(int, {remap[tid]: df_counter[tid] for tid in df_counter})
+        termids = np.asarray([i + 1 for i in range(len(sorted_terms))], dtype=np.int64)
+        terms = pa.array(sorted_terms, type=pa.string())
+        dfs = np.asarray([df_counter.get(i + 1, 0) for i in range(len(sorted_terms))], dtype=np.int64)
+    else:
+        # fast: arrival order
+        items = list(term_to_id.items())  # (term, tid)
+        # unpack into aligned arrays
+        terms_list = [t for t, _ in items]
+        termids = np.asarray([tid for _, tid in items], dtype=np.int64)
+        terms = pa.array(terms_list, type=pa.string())
+        dfs = np.asarray([df_counter.get(tid, 0) for tid in termids], dtype=np.int64)
+
+    dict_table = pa.Table.from_arrays(
+        [pa.array(termids), terms, pa.array(dfs)],
+        names=["termid", "term", "df"]
+    )
+    pq.write_table(
+        dict_table,
+        where=str(PARQ_DICT),
+        compression=PARQUET_COMPRESSION,
+        write_statistics=True,
+        use_dictionary=True  # encode all suitable columns
+    )
 
 def import_index_parquets_into_ducklake(con):
     for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):

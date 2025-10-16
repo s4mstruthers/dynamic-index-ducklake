@@ -1,6 +1,5 @@
 from pathlib import Path
-import spacy
-
+import re
 # ---------------------------------------------------------------------
 # Paths (project layout constants)
 # ---------------------------------------------------------------------
@@ -10,13 +9,6 @@ DUCKLAKE_DATA = DUCKLAKE_FOLDER / "data_files"
 DUCKLAKE_METADATA = DUCKLAKE_FOLDER / "metadata_catalog.ducklake"
 TEST_FOLDER = BASE_DIR.parent / "test"
 PARQUET_FOLDER = BASE_DIR.parent / "parquet"
-
-# ---------------------------------------------------------------------
-# NLP (spaCy) – load once; increase max_length once
-# ---------------------------------------------------------------------
-# en_core_web_sm is small and fast; suitable for tokenization
-nlp = spacy.load("en_core_web_sm")
-nlp.max_length = 2_000_000  # allow larger documents without errors
 
 # ---------------------------------------------------------------------
 # DuckLake attach / extensions
@@ -87,12 +79,20 @@ def get_termid(con, term):
 # ---------------------------------------------------------------------
 # Tokenization helpers
 # ---------------------------------------------------------------------
-def tokenize(content):
+# precompiled regex: match contiguous alphabetic sequences
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+def tokenize(content: str) -> list[str]:
     """
-    Tokenize a text into lowercase alphabetic tokens (no digits/punct).
-    Returns a list[str].
+    Extract lowercase alphabetic words from `content`.
+    Digits, punctuation, and symbols are ignored.
+    Returns a list of terms (str).
+    Example:
+        "AI-driven systems (2025)!" -> ["ai", "driven", "systems"]
     """
-    return [tok.text.lower() for tok in nlp(content) if tok.is_alpha]
+    if not content:
+        return []
+    return [m.group(0).lower() for m in _WORD_RE.finditer(content)]
 
 def tokenize_query(con, query):
     """
