@@ -14,8 +14,7 @@ from helper_functions import (
 from fts_tools import run_bm25_query
 
 # Index operations
-from index_tools import reindex  # for full rebuild (used for initialise)
-
+from index_tools import reindex, delete  # add delete import
 # Testing
 from test import run_tests  # type: ignore
 
@@ -54,29 +53,23 @@ def run_query(query, top_n=10, show_content=False, qtype="disjunctive"):
     run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype)
 
 def run_import(parquet):
-    """
-    Upsert content only (DuckLake MERGE). Does NOT rebuild the index.
-    """
+    """Upsert content only (DuckLake MERGE). Does NOT rebuild the index."""
     con = duckdb.connect()
     connect_ducklake(con)
     import_data(con, parquet)
     print(f"Upserted data from {parquet} into my_ducklake.main.data (no index rebuild).")
 
 def run_initialise(parquet, limit):
-    """
-    Drop/recreate my_ducklake.data from the source parquet (with optional limit),
-    then rebuild dict/docs/postings.
-    """
+    """Drop/recreate my_ducklake.data from the source parquet (with optional limit), then rebuild dict/docs/postings."""
     con = duckdb.connect()
     connect_ducklake(con)
     initialise_data(con, parquet=parquet, limit=limit)
+    print("Imported parquet into data, now indexing ...")
     reindex(con)
     print(f"Initialised data from {parquet} (limit={limit}) and reindexed.")
 
 def run_reindex():
-    """
-    Rebuild dict/docs/postings from current my_ducklake.data.
-    """
+    """Rebuild dict/docs/postings from current my_ducklake.data."""
     con = duckdb.connect()
     connect_ducklake(con)
     reindex(con)
@@ -91,6 +84,15 @@ def run_cleanup_orphans(older_than_days=7, dry_run=True, all_files=False):
     con = duckdb.connect()
     connect_ducklake(con)
     cleanup_orphaned_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
+
+def run_delete(docid):
+    """
+    Delete one document (docid) from data/docs/postings and adjust dict.df accordingly.
+    """
+    con = duckdb.connect()
+    connect_ducklake(con)
+    delete(con, docid)
+    print(f"Deleted docid={docid} from my_ducklake (data/docs/postings; dict.df adjusted).")
 
 
 # -----------------------
@@ -109,6 +111,7 @@ if __name__ == "__main__":
             "reindex",
             "cleanup",
             "cleanup-orphans",
+            "delete",
         ],
         default="query",
     )
@@ -139,6 +142,11 @@ if __name__ == "__main__":
         action="store_true",
         help="For cleanup modes: list files to delete without deleting them.",
     )
+    ap.add_argument(
+        "--docid",
+        type=int,
+        help="Document ID (required for --mode delete).",
+    )
     args = ap.parse_args()
 
     if args.mode == "test":
@@ -159,3 +167,7 @@ if __name__ == "__main__":
         run_cleanup(older_than_days=args.older_than, dry_run=args.dry_run, all_files=args.cleanup_all)
     elif args.mode == "cleanup-orphans":
         run_cleanup_orphans(older_than_days=args.older_than, dry_run=args.dry_run, all_files=args.cleanup_all)
+    elif args.mode == "delete":
+        if args.docid is None:
+            raise SystemExit("ERROR: provide --docid <int> for --mode delete")
+        run_delete(args.docid)

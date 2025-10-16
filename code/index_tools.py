@@ -334,45 +334,46 @@ def reindex(con):
 # (unchanged below, but see NOTE on df overcount for insert with existing docid)
 
 def delete(con, docid):
+    """
+    Delete one document (docid) and maintain df counts, using lightweight
+    UPDATE/DELETE and a tiny temp table to avoid heavy MERGE buffers.
+    """
     con.execute("BEGIN")
     try:
-        con.execute("""
-            MERGE INTO my_ducklake.dict AS dict_tbl
-            USING (
-                SELECT DISTINCT termid
-                FROM my_ducklake.postings
-                WHERE docid = ?
-            ) AS touched
-            ON (dict_tbl.termid = touched.termid)
-            WHEN MATCHED THEN UPDATE SET df = CASE WHEN dict_tbl.df > 0 THEN dict_tbl.df - 1 ELSE 0 END
-        """, [docid])
+        # (1) Collect the affected termids for this doc into a tiny temp table.
+        con.execute("DROP TABLE IF EXISTS touched_termids")
+        con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT)")
+        con.execute(
+            "INSERT INTO touched_termids "
+            "SELECT DISTINCT termid FROM my_ducklake.postings WHERE docid = ?",
+            [docid],
+        )
 
-        con.execute("""
+        # (2) Decrement df for just those termids.
+        con.execute(
+            """
+            UPDATE my_ducklake.dict
+            SET df = CASE WHEN df > 0 THEN df - 1 ELSE 0 END
+            WHERE termid IN (SELECT termid FROM touched_termids)
+            """
+        )
+
+        # (3) Remove terms whose df is now zero (only among touched termids).
+        con.execute(
+            """
             DELETE FROM my_ducklake.dict
             WHERE df = 0
-              AND termid IN (SELECT DISTINCT termid FROM my_ducklake.postings WHERE docid = ?)
-        """, [docid])
+              AND termid IN (SELECT termid FROM touched_termids)
+            """
+        )
 
-        con.execute("""
-            MERGE INTO my_ducklake.postings AS p
-            USING (SELECT ? AS docid) AS s
-            ON (p.docid = s.docid)
-            WHEN MATCHED THEN DELETE
-        """, [docid])
+        # (4) Delete postings/docs/data for the doc.
+        con.execute("DELETE FROM my_ducklake.postings WHERE docid = ?", [docid])
+        con.execute("DELETE FROM my_ducklake.docs      WHERE docid = ?", [docid])
+        con.execute("DELETE FROM my_ducklake.data      WHERE docid = ?", [docid])
 
-        con.execute("""
-            MERGE INTO my_ducklake.docs AS d
-            USING (SELECT ? AS docid) AS s
-            ON (d.docid = s.docid)
-            WHEN MATCHED THEN DELETE
-        """, [docid])
-
-        con.execute("""
-            MERGE INTO my_ducklake.data AS t
-            USING (SELECT ? AS docid) AS s
-            ON (t.docid = s.docid)
-            WHEN MATCHED THEN DELETE
-        """, [docid])
+        # (5) Clean up temp.
+        con.execute("DROP TABLE IF EXISTS touched_termids")
 
         con.execute("COMMIT")
     except Exception:

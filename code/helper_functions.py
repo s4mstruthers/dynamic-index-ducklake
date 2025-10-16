@@ -149,27 +149,20 @@ def initialise_data(con, parquet="metadata_0.parquet", limit=None):
 
 def import_data(con, parquet):
     """
-    Upsert (MERGE) rows from a source Parquet into my_ducklake.data.
-
-    Behavior:
-    - Ensures data(docid BIGINT, content TEXT) exists.
-    - MERGE matches on docid (DuckLake has no PKs; MERGE provides upsert semantics).
-    - Uses parameterized path via read_parquet(?).
+    Upsert from Parquet using MERGE INTO (DuckLake). Path is parameterized.
     """
-    src = (PARQUET_FOLDER / parquet).resolve().as_posix()
+    src = (BASE_DIR.parent / "parquet" / parquet).resolve().as_posix()
 
     con.execute("USE my_ducklake")
-    con.execute(
-        """
+    con.execute("""
         CREATE TABLE IF NOT EXISTS data (
             docid   BIGINT,
             content TEXT
         )
-        """
-    )
+    """)
 
-    con.execute(
-        """
+    # NOTE: VALUES (...) is required on the INSERT branch.
+    con.execute("""
         MERGE INTO data AS target
         USING (
             SELECT
@@ -180,10 +173,8 @@ def import_data(con, parquet):
         ON (target.docid = source.docid)
         WHEN MATCHED THEN UPDATE SET content = source.content
         WHEN NOT MATCHED THEN INSERT (docid, content)
-        """,
-        [src],
-    )
-
+        VALUES (source.docid, source.content)
+    """, [src])
 # -----------------------
 # DuckLake maintenance: cleanup
 # -----------------------
