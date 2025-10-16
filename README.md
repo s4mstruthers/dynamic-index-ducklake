@@ -5,7 +5,7 @@ It enables incremental data imports, efficient reindexing, and flexible BM25-bas
 
 ---
 
-## 📁 Project Overview
+## Project Overview
 
 The system consists of modular Python components for indexing, querying, and managing document data. 
 It leverages DuckLake as the metadata catalog and DuckDB’s analytics engine for storage and retrieval.
@@ -22,9 +22,9 @@ It leverages DuckLake as the metadata catalog and DuckDB’s analytics engine fo
 
 ---
 
-## 🧠 Key Concepts
+## Key Concepts
 
-### 🗂️ DuckLake Catalog
+### DuckLake Catalog
 
 The metadata catalog (e.g. `metadata_catalog.ducklake`) stores schema definitions and pointers to data files.
 
@@ -33,7 +33,7 @@ If it doesn’t exist, the system automatically creates one using:
 CREATE DUCKLAKE 'metadata_catalog.ducklake' (DATA_PATH 'data/');
 ```
 
-### 📊 Index Structure
+### Index Structure
 
 The system builds three main tables:
 
@@ -47,7 +47,7 @@ These are stored as Parquet files and imported back into DuckLake.
 
 ---
 
-## ⚙️ Functionality
+## Functionality
 
 ### 1. Initialise
 Create and index a dataset from a source Parquet file.
@@ -135,7 +135,7 @@ python dynamic_index.py --mode test
 
 ---
 
-## 🧩 BM25 Querying (fts_tools.py)
+## BM25 Querying (fts_tools.py)
 
 BM25 computes relevance using:
 ```
@@ -151,7 +151,7 @@ Modes:
 
 ---
 
-## 🧱 Architecture
+## Architecture
 
 ```
 Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/postings → import_index_parquets_into_ducklake
@@ -166,7 +166,7 @@ Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/posti
 
 ---
 
-## 🛠️ Dependencies
+## Dependencies
 
 - Python ≥ 3.10
 - DuckDB ≥ 1.4
@@ -177,7 +177,7 @@ Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/posti
 
 ---
 
-## 🧾 Example Query Output
+## Example Query Output
 
 ```
 Top 5 for disjunctive BM25 query: 'machine learning' (raw BM25 scores)
@@ -188,7 +188,7 @@ Top 5 for disjunctive BM25 query: 'machine learning' (raw BM25 scores)
 
 ---
 
-## 🧹 Maintenance Notes
+## Maintenance Notes
 
 - Old `.ducklake` or `.parquet` files can be pruned using cleanup modes.
 - If index corruption occurs, simply run:
@@ -199,7 +199,7 @@ Top 5 for disjunctive BM25 query: 'machine learning' (raw BM25 scores)
 
 ---
 
-## ⚡ Tips for Large-Scale Use
+## Tips for Large-Scale Use
 
 - Use `PRAGMA threads=<n>` to leverage all CPU cores.
 - Keep `BATCH_SIZE` high (e.g. 10,000) in `_iter_data()` for minimal roundtrips.
@@ -207,7 +207,7 @@ Top 5 for disjunctive BM25 query: 'machine learning' (raw BM25 scores)
 
 ---
 
-## 🧩 Folder Structure
+## Folder Structure
 
 ```
 project_root/
@@ -229,7 +229,7 @@ project_root/
 
 ---
 
-## 🧾 License
+## License
 
 MIT License — free to use, modify, and distribute with attribution.
 
