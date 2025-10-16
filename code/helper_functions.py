@@ -127,7 +127,7 @@ def initialise_data(con, parquet="metadata_0.parquet", limit=None):
     - Applies ORDER BY docid for deterministic ingest.
     - Optional `limit` for reduced initial loads.
     """
-    src = (PARQUET_FOLDER / parquet).resolve().as_posix()
+    src = (PARQUET_FOLDER / "webcrawl_data" / parquet).resolve().as_posix()
 
     con.execute("USE my_ducklake")
     con.execute("DROP TABLE IF EXISTS data")
