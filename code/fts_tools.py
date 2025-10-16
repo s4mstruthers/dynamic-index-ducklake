@@ -1,73 +1,173 @@
 # fts_tools.py
-from __future__ import annotations
 
-import math
-import heapq
+from helper_functions import tokenize_query
 
-# Only import light helpers; these do not import fts_tools.
-from helper_functions import (
-    get_freq, get_dl, get_avgdl, get_docids, get_ndocs, get_ndocs_t, tokenize_query
-)
 
-# ----------------------- BM25 core --------------------------------
-
-def tf(con, termid: int, docid: int) -> float:
+def conjunctive_bm25(con, query, top_n):
     """
-    BM25 term-frequency component for (termid, docid).
-    Uses standard parameters K1=1.2, B=0.75 and:
-        tf = f / (f + K1 * (1 - B + B * (dl / avgdl)))
-    where:
-        f    = raw term frequency (postings.tf)
-        dl   = document length (docs.len)
-        avgdl= average document length over corpus
+    BM25 (AND semantics): only documents that contain ALL query terms are scored/returned.
+    Returns: list[(docid, score)] ordered by score desc, length <= top_n.
     """
-    freq = get_freq(con, termid, docid)
-    dl = get_dl(con, docid)
-    avgdl = get_avgdl(con)
-    K1, B = 1.2, 0.75
-    return 0.0 if dl == 0 or avgdl is None or avgdl == 0 else freq / (freq + K1 * (1 - B + B * (dl / avgdl)))
-
-
-def idf(con, termid: int) -> float:
-    """
-    BM25 inverse document frequency:
-        idf = ln( (N - N_t + 0.5) / (N_t + 0.5) )
-    where:
-        N   = total number of documents
-        N_t = number of documents containing termid (dict.df)
-    """
-    N = get_ndocs(con)
-    N_t = get_ndocs_t(con, termid)
-    # guard: avoid log of non-positive (can happen with tiny corpora)
-    numerator = (N - N_t + 0.5)
-    denominator = (N_t + 0.5)
-    if denominator <= 0 or numerator <= 0:
-        return 0.0
-    return math.log(numerator / denominator)
-
-
-def bm25_score(con, terms: list[int], docid: int) -> float:
-    """
-    BM25 score for a document given a list of query termids.
-    """
-    return sum(idf(con, t) * tf(con, t, docid) for t in terms)
-
-
-def match_bm25(con, query: str, top_n: int):
-    """
-    Rank documents by BM25 for a raw query string.
-
-    Steps:
-      1) tokenize_query(con, query) -> list of termids (unknown terms dropped)
-      2) iterate all docids; compute BM25 score per doc
-      3) return top_n as [(docid, score)] in descending score
-
-    NOTE: This is a simple full-scan ranker for testing/validation.
-    """
-    terms = tokenize_query(con, query)
-    if not terms:
+    termids = tokenize_query(con, query)
+    if not termids:
         return []
 
-    docids = get_docids(con)
-    scores = [(docid, bm25_score(con, terms, docid)) for docid in docids]
-    return heapq.nlargest(top_n, scores, key=lambda x: x[1])
+    # Temporary query term table
+    con.execute("DROP TABLE IF EXISTS query_terms")
+    con.execute("CREATE TEMP TABLE query_terms(termid BIGINT)")
+    con.executemany("INSERT INTO query_terms VALUES (?)", [(t,) for t in termids])
+
+    K1 = 1.2
+    B  = 0.75
+
+    rows = con.execute(
+        """
+        /* ----------------------------------------------------------------------
+           Compute BM25 scores for documents that contain ALL query terms.
+           BM25(D,Q) = SUM_over_t_in_Q [ idf(t) * tf_norm(t,D) ]
+        ---------------------------------------------------------------------- */
+
+        WITH corpus_stats AS (
+          -- Compute N (number of documents) and avgdl (average document length)
+          SELECT
+            COUNT(*)::DOUBLE  AS N,
+            AVG(docs.len)::DOUBLE AS avgdl
+          FROM my_ducklake.docs AS docs
+        ),
+
+        term_hits AS (
+          -- Candidate term occurrences restricted to query terms
+          SELECT
+            postings.docid         AS docid,
+            postings.termid        AS termid,
+            postings.tf::DOUBLE    AS tf,     -- f_(t,D)
+            docs.len::DOUBLE       AS len     -- dl_D
+          FROM my_ducklake.postings AS postings
+          JOIN my_ducklake.docs AS docs ON docs.docid = postings.docid
+          WHERE postings.termid IN (SELECT termid FROM query_terms)
+        ),
+
+        conjunctive_documents AS (
+          -- Keep only documents that contain ALL query terms
+          SELECT docid
+          FROM term_hits
+          GROUP BY docid
+          HAVING COUNT(DISTINCT termid) = (SELECT COUNT(*) FROM query_terms)
+        ),
+
+        idf_table AS (
+          -- Compute idf(t) = ln( (N - df_t + 0.5) / (df_t + 0.5) )
+          SELECT
+            dict.termid AS termid,
+            ln( (stats.N - dict.df + 0.5) / (dict.df + 0.5) ) AS idf
+          FROM my_ducklake.dict AS dict, corpus_stats AS stats
+          WHERE dict.termid IN (SELECT termid FROM query_terms)
+        ),
+
+        scored AS (
+          -- For each (doc, term) pair that appears in the doc,
+          -- compute subscore = idf(t) * ((K1 + 1) * f_t,D) / (f_t,D + K1 * (1 - B + B * (dl_D / avgdl)))
+          SELECT
+            th.docid AS docid,
+            SUM(
+              idf_table.idf *
+              ( (? + 1) * th.tf ) /
+              ( th.tf + ? * (1 - ? + ? * (th.len / stats.avgdl)) )
+            ) AS score
+          FROM term_hits AS th
+          JOIN conjunctive_documents AS cd ON cd.docid = th.docid
+          JOIN idf_table ON idf_table.termid = th.termid
+          CROSS JOIN corpus_stats AS stats
+          GROUP BY th.docid
+        )
+
+        SELECT docid, score
+        FROM scored
+        ORDER BY score DESC
+        LIMIT ?
+        """,
+        [K1, K1, B, B, top_n],
+    ).fetchall()
+
+    con.execute("DROP TABLE IF EXISTS query_terms")
+    return [(row[0], float(row[1])) for row in rows]
+
+
+def disjunctive_bm25(con, query, top_n):
+    """
+    BM25 (OR semantics): documents that contain ANY query term are scored/returned.
+    Returns: list[(docid, score)] ordered by score desc, length <= top_n.
+    """
+    termids = tokenize_query(con, query)
+    if not termids:
+        return []
+
+    # Temporary query term table
+    con.execute("DROP TABLE IF EXISTS query_terms")
+    con.execute("CREATE TEMP TABLE query_terms(termid BIGINT)")
+    con.executemany("INSERT INTO query_terms VALUES (?)", [(t,) for t in termids])
+
+    K1 = 1.2
+    B  = 0.75
+
+    rows = con.execute(
+        """
+        /* ----------------------------------------------------------------------
+           Compute BM25 scores for documents that contain ANY query term.
+           BM25(D,Q) = SUM_over_t_in_Q [ idf(t) * tf_norm(t,D) ]
+        ---------------------------------------------------------------------- */
+
+        WITH corpus_stats AS (
+          -- Compute N (number of documents) and avgdl (average document length)
+          SELECT
+            COUNT(*)::DOUBLE  AS N,
+            AVG(docs.len)::DOUBLE AS avgdl
+          FROM my_ducklake.docs AS docs
+        ),
+
+        term_hits AS (
+          -- Candidate term occurrences restricted to query terms
+          SELECT
+            postings.docid         AS docid,
+            postings.termid        AS termid,
+            postings.tf::DOUBLE    AS tf,     -- (f_t,D)
+            docs.len::DOUBLE       AS len     -- (dl_D)
+          FROM my_ducklake.postings AS postings
+          JOIN my_ducklake.docs AS docs ON docs.docid = postings.docid
+          WHERE postings.termid IN (SELECT termid FROM query_terms)
+        ),
+
+        idf_table AS (
+          -- Compute idf(t) = ln( (N - df_t + 0.5) / (df_t + 0.5) )
+          SELECT
+            dict.termid AS termid,
+            ln( (stats.N - dict.df + 0.5) / (dict.df + 0.5) ) AS idf
+          FROM my_ducklake.dict AS dict, corpus_stats AS stats
+          WHERE dict.termid IN (SELECT termid FROM query_terms)
+        ),
+
+        scored AS (
+          -- For each (doc, term) that matches, compute and sum BM25 subscores
+          SELECT
+            th.docid AS docid,
+            SUM(
+              idf_table.idf *
+              ( (? + 1) * th.tf ) /
+              ( th.tf + ? * (1 - ? + ? * (th.len / stats.avgdl)) )
+            ) AS score
+          FROM term_hits AS th
+          JOIN idf_table ON idf_table.termid = th.termid
+          CROSS JOIN corpus_stats AS stats
+          GROUP BY th.docid
+        )
+
+        SELECT docid, score
+        FROM scored
+        ORDER BY score DESC
+        LIMIT ?
+        """,
+        [K1, K1, B, B, top_n],
+    ).fetchall()
+
+    con.execute("DROP TABLE IF EXISTS query_terms")
+    return [(row[0], float(row[1])) for row in rows]

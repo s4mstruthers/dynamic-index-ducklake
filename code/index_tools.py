@@ -1,293 +1,335 @@
-# index_tools.py
-from __future__ import annotations
-
-import duckdb
-import pandas as pd
 from collections import Counter, defaultdict
 from pathlib import Path
+import pandas as pd
 
-# Only import small utilities from helper_functions to avoid cycles.
-# DO NOT import index_tools back in helper_functions at module top-level.
 from helper_functions import PARQUET_FOLDER, tokenize
+
+# -------------------------------------------------
+# Tunables
+# -------------------------------------------------
+BATCH_SIZE = 100_000         # tune to your RAM / I/O
+PARQUET_ENGINE = "pyarrow"   # faster than fastparquet typically
+PARQUET_COMPRESSION = "zstd" # smaller and fast; fall back to 'snappy' if needed
+DETERMINISTIC_TERMIDS = False  # if True, termids assigned lexicographically
 
 # -------------------------------------------------------------------
 # Parquet output locations (single files; overwritten on each build)
 # -------------------------------------------------------------------
-PARQ_DIR: Path  = PARQUET_FOLDER / "index"
-PARQ_DICT: Path = PARQ_DIR / "dict.parquet"
-PARQ_DOCS: Path = PARQ_DIR / "docs.parquet"
-PARQ_POST: Path = PARQ_DIR / "postings.parquet"
+PARQ_DIR  = PARQUET_FOLDER / "index"
+PARQ_DICT = PARQ_DIR / "dict.parquet"
+PARQ_DOCS = PARQ_DIR / "docs.parquet"
+PARQ_POST = PARQ_DIR / "postings.parquet"
 
+# --------------- helpers -------------------
 
-# ----------------------- internal helpers --------------------------
-
-def _ensure_dirs() -> None:
-    """
-    Ensure the index output directory exists.
-    Writes: .../parquet/index/{dict,docs,postings}.parquet
-    """
+def _ensure_dirs():
     PARQ_DIR.mkdir(parents=True, exist_ok=True)
 
-
-def _fetch_data_df(con: duckdb.DuckDBPyConnection, limit: int | None = None) -> pd.DataFrame:
+#This uses batching to reduce python ducklake roundtrips
+def _iter_data(con):
     """
-    Pull (docid, content) from DuckLake virtual table my_ducklake.main.data.
-    NOTE: This assumes helper_functions.connect_ducklake() has already attached the DB.
+    Stream (docid, content) rows from my_ducklake.main.data (all rows).
     """
     con.execute("USE my_ducklake")
-    sql = "SELECT docid, content FROM main.data"
-    return con.execute(sql + (" LIMIT ?" if limit is not None else ""), (int(limit),) if limit else ()).fetchdf()
+    con.execute("SELECT docid, content FROM main.data")
+    fetch = con.fetchmany
+    while True:
+        batch = fetch(BATCH_SIZE)
+        if not batch:
+            break
+        for docid, content in batch:
+            yield docid, content
 
-
-def _build_index(df: pd.DataFrame):
+def _build_index(rows):
     """
-    Build inverted index *purely in Python* (no PK/FK, no constraints).
-
-    Produces three lists of rows:
-      - dict_rows:    [(termid, term, df)]
-      - docs_rows:    [(docid, len)]
-      - postings_rows:[(termid, docid, tf)]
-
-    Definitions:
-      df = number of distinct documents containing the term.
-      len = token count of the document.
-      tf = term frequency of the term in the document.
+    Python inverted index. Returns three plain lists of tuples:
+      dict_rows:    [(termid, term, df)]
+      docs_rows:    [(docid, len)]
+      postings_rows:[(termid, docid, tf)]
     """
-    term_to_id: dict[str, int] = {}
-    df_counter: defaultdict[int, int] = defaultdict(int)  # termid -> df
-    docs_rows: list[tuple[int, int]] = []
-    postings_rows: list[tuple[int, int, int]] = []
+    term_to_id = {}
+    df_counter = defaultdict(int)
+    docs_table = []
+    postings_table = []
 
     next_tid = 1
+    append_doc = docs_table.append
+    append_post = postings_table.append
 
-    for docid, content in zip(df["docid"].tolist(), df["content"].tolist()):
+    # First pass: assign ids (arrival order), collect postings and df
+    for docid, content in rows:
         text = "" if content is None else str(content)
-        toks = tokenize(text)
+        tokens = tokenize(text)
 
-        # docs.len
-        docs_rows.append((int(docid), len(toks)))
-
-        if not toks:
+        append_doc((docid, len(tokens)))
+        if not tokens:
             continue
 
-        tf = Counter(toks)  # per-document TF for each term
-
-        # postings + assign termids
+        tf = Counter(tokens)
         for term, freq in tf.items():
             tid = term_to_id.setdefault(term, next_tid)
             if tid == next_tid:
                 next_tid += 1
-            postings_rows.append((tid, int(docid), int(freq)))
+            append_post((tid, docid, freq))
 
-        # document frequency (once per distinct term)
-        for term in tf.keys():
+        # iterate keys directly (no .keys())
+        for term in tf:
             df_counter[term_to_id[term]] += 1
 
-    # finalize dict rows
-    dict_rows = [(tid, term, int(df_counter.get(tid, 0))) for term, tid in term_to_id.items()]
-    return dict_rows, docs_rows, postings_rows
+    # Optional second pass to make termids deterministic by term order
+    if DETERMINISTIC_TERMIDS:
+        # remap TIDs by lexicographic order of terms
+        sorted_terms = sorted(term_to_id.keys())
+        remap = {term_to_id[t]: i+1 for i, t in enumerate(sorted_terms)}
+        # remap postings
+        postings_table = [(remap[tid], docid, tf) for (tid, docid, tf) in postings_table]
+        # rebuild df_counter under new ids
+        df_counter = defaultdict(int, {remap[tid]: df_counter[tid] for tid in df_counter})
+        # rebuild dict_table deterministically
+        dict_table = [(i+1, t, df_counter.get(i+1, 0)) for i, t in enumerate(sorted_terms)]
+    else:
+        # build dict_table as encountered
+        dict_table = [(tid, term, df_counter.get(tid, 0)) for term, tid in term_to_id.items()]
 
+    return dict_table, docs_table, postings_table
 
-def _overwrite_parquet(path: Path, frame: pd.DataFrame) -> None:
+# --------------- public API ----------------
+
+def build_index_to_parquet_from_ducklake(con):
     """
-    Overwrite a single Parquet file (delete previous file if it exists).
-    Guarantees a single file per table.
-    """
-    if path.exists():
-        path.unlink()
-    frame.to_parquet(path, index=False)
-
-
-# ----------------------- public API --------------------------------
-
-def build_index_to_parquet_from_ducklake(con: duckdb.DuckDBPyConnection, limit: int | None = None) -> None:
-    """
-    Read `my_ducklake.main.data` → build index in memory → write
-    single-file Parquets: dict.parquet, docs.parquet, postings.parquet.
+    1) Stream ALL rows from my_ducklake.main.data
+    2) Build index in memory (pure Python)
+    3) Write single-file Parquets with compression
     """
     _ensure_dirs()
-    df = _fetch_data_df(con, limit)
-    dict_rows, docs_rows, postings_rows = _build_index(df)
 
-    _overwrite_parquet(PARQ_DICT, pd.DataFrame(dict_rows,  columns=["termid", "term", "df"]))
-    _overwrite_parquet(PARQ_DOCS, pd.DataFrame(docs_rows,  columns=["docid", "len"]))
-    _overwrite_parquet(PARQ_POST, pd.DataFrame(postings_rows, columns=["termid", "docid", "tf"]))
+    dict_table, docs_table, postings_table = _build_index(_iter_data(con))
 
+    # Set explicit dtypes to reduce file size and ensure consistency
+    df_dict = pd.DataFrame(dict_table, columns=["termid", "term", "df"])
+    df_docs = pd.DataFrame(docs_table, columns=["docid", "len"])
+    df_post = pd.DataFrame(postings_table, columns=["termid", "docid", "tf"])
 
-def import_index_parquets_into_ducklake(con: duckdb.DuckDBPyConnection) -> None:
+    # convert integer columns to int64 to avoid mixed dtypes
+    for col in ("termid", "df"):
+        if col in df_dict:
+            df_dict[col] = df_dict[col].astype("int64", copy=False)
+    for col in ("docid", "len"):
+        if col in df_docs:
+            df_docs[col] = df_docs[col].astype("int64", copy=False)
+    for col in ("termid", "docid", "tf"):
+        if col in df_post:
+            df_post[col] = df_post[col].astype("int64", copy=False)
+
+    # Write Parquet (overwrite semantics by default)
+    df_dict.to_parquet(PARQ_DICT, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
+    df_docs.to_parquet(PARQ_DOCS, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
+    df_post.to_parquet(PARQ_POST, index=False, engine=PARQUET_ENGINE, compression=PARQUET_COMPRESSION)
+
+def import_index_parquets_into_ducklake(con):
     """
-    Import the three Parquet files back into DuckLake as *tables* (no constraints).
-    If you prefer virtual tables, convert these CREATE TABLE + INSERTs into CREATE VIEW ... AS read_parquet(...).
+    Materialize the three Parquet files into physical DuckDB tables:
+      my_ducklake.main.dict, my_ducklake.main.docs, my_ducklake.main.postings
     """
-    con.execute("USE my_ducklake")
-
     for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):
         if not p.exists():
             raise FileNotFoundError(f"Missing parquet file: {p}")
 
-    # Drop & recreate (no constraints)
-    con.execute("DROP TABLE IF EXISTS main.postings")
-    con.execute("DROP TABLE IF EXISTS main.docs")
-    con.execute("DROP TABLE IF EXISTS main.dict")
-
-    con.execute("""
-        CREATE TABLE main.dict (
-            termid BIGINT,
-            term   TEXT,
-            df     BIGINT
-        )
-    """)
-    con.execute("""
-        CREATE TABLE main.docs (
-            docid BIGINT,
-            len   BIGINT
-        )
-    """)
-    con.execute("""
-        CREATE TABLE main.postings (
-            termid BIGINT,
-            docid  BIGINT,
-            tf     BIGINT
-        )
-    """)
-
-    con.execute("INSERT INTO main.dict SELECT * FROM read_parquet(?)", (str(PARQ_DICT),))
-    con.execute("INSERT INTO main.docs SELECT * FROM read_parquet(?)", (str(PARQ_DOCS),))
-    con.execute("INSERT INTO main.postings SELECT * FROM read_parquet(?)", (str(PARQ_POST),))
-
-
-def build_and_import_from_ducklake(con: duckdb.DuckDBPyConnection, limit: int | None = None) -> None:
-    """
-    Convenience wrapper: build Parquets from DuckLake data, then import them as DuckLake tables.
-    """
-    build_index_to_parquet_from_ducklake(con, limit)
-    import_index_parquets_into_ducklake(con)
-
-
-# ----------------------- CRUD helpers (batch index maintenance) ----
-
-def _next_id(con: duckdb.DuckDBPyConnection, table: str, col: str) -> int:
-    """
-    Return next integer id as (MAX(col)+1) or 1 if empty.
-    """
-    return int(con.execute(f"SELECT COALESCE(MAX({col}) + 1, 1) FROM my_ducklake.{table}").fetchone()[0]) # type: ignore
-
-
-def _exists(con: duckdb.DuckDBPyConnection, table: str, col: str, val) -> bool:
-    """
-    Return True if a row exists in my_ducklake.{table} where {col} = val.
-    """
-    return bool(con.execute(f"SELECT 1 FROM my_ducklake.{table} WHERE {col} = ? LIMIT 1", (val,)).fetchone())
-
-
-def delete(con: duckdb.DuckDBPyConnection, docid: int):
-    """
-    Delete a document from data/docs/postings and update dict.df accordingly.
-    Manages its own transaction (no nested BEGIN from caller).
-    """
+    con.execute("USE my_ducklake")
     con.execute("BEGIN")
     try:
-        # decrement df once per distinct term in this doc
+        # Faster than DROP + CREATE: use CREATE OR REPLACE TABLE (DuckDB supports it)
         con.execute("""
-            UPDATE my_ducklake.dict
-            SET df = CASE WHEN df > 0 THEN df - 1 ELSE 0 END
-            WHERE termid IN (
-                SELECT DISTINCT termid
-                FROM my_ducklake.postings
-                WHERE docid = ?
-            )
-        """, (docid,))
+            CREATE OR REPLACE TABLE dict AS
+            SELECT CAST(termid AS BIGINT) AS termid,
+                   CAST(term   AS TEXT)   AS term,
+                   CAST(df     AS BIGINT) AS df
+            FROM read_parquet(?)
+        """, [str(PARQ_DICT)])
 
-        # remove dict rows that hit 0 (only those touched)
         con.execute("""
-            DELETE FROM my_ducklake.dict
-            WHERE df = 0
-              AND termid IN (
-                  SELECT DISTINCT termid
-                  FROM my_ducklake.postings
-                  WHERE docid = ?
-              )
-        """, (docid,))
+            CREATE OR REPLACE TABLE docs AS
+            SELECT CAST(docid AS BIGINT) AS docid,
+                   CAST(len   AS BIGINT) AS len
+            FROM read_parquet(?)
+        """, [str(PARQ_DOCS)])
 
-        # explicit cleanup (no cascades)
-        con.execute("DELETE FROM my_ducklake.postings WHERE docid = ?", (docid,))
-        con.execute("DELETE FROM my_ducklake.docs      WHERE docid = ?", (docid,))
-        con.execute("DELETE FROM my_ducklake.data      WHERE docid = ?", (docid,))
+        con.execute("""
+            CREATE OR REPLACE TABLE postings AS
+            SELECT CAST(termid AS BIGINT) AS termid,
+                   CAST(docid  AS BIGINT) AS docid,
+                   CAST(tf     AS BIGINT) AS tf
+            FROM read_parquet(?)
+        """, [str(PARQ_POST)])
+
+        # (Optional) add secondary indexes for faster query/merge joins
+        con.execute("CREATE INDEX IF NOT EXISTS idx_postings_termid ON postings(termid)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_postings_docid  ON postings(docid)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_docs_docid      ON docs(docid)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_dict_termid     ON dict(termid)")
 
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
 
-
-def insert(con: duckdb.DuckDBPyConnection, doc: str, docid: int | None = None):
+def reindex(con):
     """
-    Insert or upsert a document with text `doc`.
-
-    Steps:
-      1) Tokenize content; compute per-term TFs.
-      2) For each distinct term: insert (termid, term, df=1) or df++ if exists.
-      3) Insert/update docs(docid, len); allocate docid if not provided.
-      4) Insert postings rows (termid, docid, tf).
-      5) Insert/update data(docid, content).
-
-    Returns the docid used.
+    Reindex my_ducklake.main.data:
+      - Overwrite dict/docs/postings Parquet files
+      - Replace DuckLake tables from those Parquets
     """
+    import os
+    # Let DuckDB parallelize downstream ops safely
+    threads = max(1, (os.cpu_count() or 1))
+    con.execute(f"PRAGMA threads={threads};")
+    
+    build_index_to_parquet_from_ducklake(con)
+    import_index_parquets_into_ducklake(con)
+
+# ----------------------- Update tools -------------------------------
+# (unchanged below, but see NOTE on df overcount for insert with existing docid)
+
+def delete(con, docid):
+    con.execute("BEGIN")
+    try:
+        con.execute("""
+            MERGE INTO my_ducklake.dict AS dict_tbl
+            USING (
+                SELECT DISTINCT termid
+                FROM my_ducklake.postings
+                WHERE docid = ?
+            ) AS touched
+            ON (dict_tbl.termid = touched.termid)
+            WHEN MATCHED THEN UPDATE SET df = CASE WHEN dict_tbl.df > 0 THEN dict_tbl.df - 1 ELSE 0 END
+        """, [docid])
+
+        con.execute("""
+            DELETE FROM my_ducklake.dict
+            WHERE df = 0
+              AND termid IN (SELECT DISTINCT termid FROM my_ducklake.postings WHERE docid = ?)
+        """, [docid])
+
+        con.execute("""
+            MERGE INTO my_ducklake.postings AS p
+            USING (SELECT ? AS docid) AS s
+            ON (p.docid = s.docid)
+            WHEN MATCHED THEN DELETE
+        """, [docid])
+
+        con.execute("""
+            MERGE INTO my_ducklake.docs AS d
+            USING (SELECT ? AS docid) AS s
+            ON (d.docid = s.docid)
+            WHEN MATCHED THEN DELETE
+        """, [docid])
+
+        con.execute("""
+            MERGE INTO my_ducklake.data AS t
+            USING (SELECT ? AS docid) AS s
+            ON (t.docid = s.docid)
+            WHEN MATCHED THEN DELETE
+        """, [docid])
+
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+def insert(con, doc, docid=None):
     tokens = tokenize(doc)
     if not tokens:
         return None
 
     tf = Counter(tokens)
-    terms = list(tf.keys())
+    distinct_terms = list(tf.keys())
+    doc_len = len(tokens)
 
     con.execute("BEGIN")
     try:
-        # 1) dict "upsert" per distinct term (manual)
-        term_to_id: dict[str, int] = {}
-        for t in terms:
-            # Inline lookup to avoid import cycles
-            tid_row = con.execute("SELECT termid FROM my_ducklake.dict WHERE term = ?", (t,)).fetchone()
-            tid = int(tid_row[0]) if tid_row else None
+        con.execute("CREATE TEMP TABLE src_terms(term TEXT, tf BIGINT)")
+        con.executemany("INSERT INTO src_terms(term, tf) VALUES (?, ?)", [(t, tf[t]) for t in distinct_terms])
 
-            if tid is None:
-                tid = _next_id(con, "dict", "termid")
-                con.execute("INSERT INTO my_ducklake.dict (termid, term, df) VALUES (?, ?, 1)", (tid, t))
-            else:
-                con.execute("UPDATE my_ducklake.dict SET df = df + 1 WHERE termid = ?", (tid,))
+        con.execute("""
+            CREATE TEMP TABLE docid_sql AS
+            SELECT
+                COALESCE(?, (SELECT COALESCE(MAX(docid), 0) + 1 FROM my_ducklake.docs)) AS docid
+        """, [docid])
 
-            term_to_id[t] = tid
+        con.execute("""
+            WITH base AS (SELECT COALESCE(MAX(termid), 0) AS base FROM my_ducklake.dict),
+            dedup AS (SELECT DISTINCT term, tf FROM src_terms),
+            annot AS (
+                SELECT
+                    d.termid AS existing_tid,
+                    s.term,
+                    s.tf,
+                    CASE WHEN d.termid IS NULL
+                         THEN (SELECT base FROM base) + ROW_NUMBER() OVER (ORDER BY s.term)
+                         ELSE d.termid
+                    END AS ins_tid
+                FROM dedup s
+                LEFT JOIN my_ducklake.dict d ON d.term = s.term
+            )
+            MERGE INTO my_ducklake.dict AS tgt
+            USING annot AS a
+            ON (tgt.term = a.term)
+            WHEN MATCHED THEN UPDATE SET df = tgt.df + 1
+            WHEN NOT MATCHED THEN INSERT (termid, term, df) VALUES (a.ins_tid, a.term, 1)
+        """)
 
-        # 2) docs row
-        doc_len = len(tokens)
-        if docid is None:
-            docid = _next_id(con, "docs", "docid")
-            con.execute("INSERT INTO my_ducklake.docs (docid, len) VALUES (?, ?)", (docid, doc_len))
-        else:
-            if _exists(con, "docs", "docid", docid):
-                con.execute("UPDATE my_ducklake.docs SET len = ? WHERE docid = ?", (doc_len, docid))
-            else:
-                con.execute("INSERT INTO my_ducklake.docs (docid, len) VALUES (?, ?)", (docid, doc_len))
+        con.execute("""
+            MERGE INTO my_ducklake.docs AS d
+            USING (SELECT docid FROM docid_sql) AS s
+            ON (d.docid = s.docid)
+            WHEN MATCHED THEN UPDATE SET len = ?
+            WHEN NOT MATCHED THEN INSERT (docid, len) VALUES (s.docid, ?)
+        """, [doc_len, doc_len])
 
-        # 3) postings rows
-        rows = [(term_to_id[t], docid, tf[t]) for t in terms]
-        con.executemany("INSERT INTO my_ducklake.postings (termid, docid, tf) VALUES (?, ?, ?)", rows)
+        con.execute("""
+            WITH term_ids AS (
+                SELECT d.termid, s.term, s.tf
+                FROM src_terms s
+                JOIN my_ducklake.dict d ON d.term = s.term
+            ),
+            src_post AS (
+                SELECT t.termid, ds.docid, t.tf
+                FROM term_ids t
+                CROSS JOIN docid_sql ds
+            )
+            MERGE INTO my_ducklake.postings AS p
+            USING src_post AS sp
+            ON (p.termid = sp.termid AND p.docid = sp.docid)
+            WHEN MATCHED THEN UPDATE SET tf = sp.tf
+            WHEN NOT MATCHED THEN INSERT (termid, docid, tf) VALUES (sp.termid, sp.docid, sp.tf)
+        """)
 
-        # 4) data row
-        if _exists(con, "data", "docid", docid):
-            con.execute("UPDATE my_ducklake.data SET content = ? WHERE docid = ?", (doc, docid))
-        else:
-            con.execute("INSERT INTO my_ducklake.data (docid, content) VALUES (?, ?)", (docid, doc))
+        con.execute("""
+            MERGE INTO my_ducklake.data AS t
+            USING (SELECT docid, ? AS content FROM docid_sql) AS s
+            ON (t.docid = s.docid)
+            WHEN MATCHED THEN UPDATE SET content = s.content
+            WHEN NOT MATCHED THEN INSERT (docid, content) VALUES (s.docid, s.content)
+        """, [doc])
+
+        final_docid = con.execute("SELECT docid FROM docid_sql").fetchone()[0]
+
+        con.execute("DROP TABLE IF EXISTS src_terms")
+        con.execute("DROP TABLE IF EXISTS docid_sql")
 
         con.execute("COMMIT")
-        return docid
+        return final_docid
     except Exception:
         con.execute("ROLLBACK")
         raise
 
-
-def modify(con: duckdb.DuckDBPyConnection, docid: int, content: str):
-    """
-    Replace a document’s content by: delete(docid) then insert(content, docid).
-    """
-    delete(con, docid)
-    return insert(con, content, docid=docid)
+def modify(con, docid, content):
+    con.execute("BEGIN")
+    try:
+        delete(con, docid)
+        new_id = insert(con, content, docid=docid)
+        con.execute("COMMIT")
+        return new_id
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
