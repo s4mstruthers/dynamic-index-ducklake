@@ -2,32 +2,11 @@
 
 A professional implementation of a **dynamic full-text indexing system** built on **DuckLake**, enabling document-level insertions, updates, and deletions without reindexing the entire corpus.
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
----
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Environment Setup](#environment-setup)
-  - [Conda](#conda)
-  - [Python venv](#python-venv)
-- [Project Overview](#project-overview)
-- [Core Commands](#core-commands)
-- [BM25 Details](#bm25-details)
-- [Architecture](#architecture)
-- [Folder Layout](#folder-layout)
-- [License](#license)
-=======
 This project investigates **dynamic indexing in DuckLake**, utilizing its **transactional, snapshot-based storage engine** to efficiently modify large datasets. By leveraging **ACID transactions** and **SQL-driven data operations**, it allows precise index updates and supports **document takedowns or content revisions** without disrupting overall index integrity.
->>>>>>> Stashed changes
-=======
-This project investigates **dynamic indexing in DuckLake**, utilizing its **transactional, snapshot-based storage engine** to efficiently modify large datasets. By leveraging **ACID transactions** and **SQL-driven data operations**, it allows precise index updates and supports **document takedowns or content revisions** without disrupting overall index integrity.
->>>>>>> Stashed changes
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### 1. Clone the Repository
 ```bash
@@ -57,7 +36,7 @@ python code/dynamic_index.py --mode sanity
 
 ---
 
-## Overview
+## 📘 Overview
 
 This project demonstrates an **incrementally updatable full-text search index** using **DuckLake** as the underlying data catalog.  
 Traditional search engines often require full reindexing when the corpus changes. This implementation overcomes that limitation by using **transactional operations** and **snapshot isolation** provided by DuckLake.
@@ -72,7 +51,7 @@ Traditional search engines often require full reindexing when the corpus changes
 
 ---
 
-## System Architecture
+## 🧠 System Architecture
 
 ```
 Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/postings → import_index_parquets_into_ducklake
@@ -87,7 +66,7 @@ Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/posti
 
 ---
 
-## Core Functionality
+## ⚙️ Core Functionality
 
 ### Initialise
 Rebuild the dataset and index from one or more Parquet files.
@@ -139,7 +118,7 @@ python code/dynamic_index.py --mode test
 
 ---
 
-## BM25 Ranking Model
+## 🔍 BM25 Ranking Model
 
 The BM25 ranking formula used is:
 
@@ -158,7 +137,7 @@ Modes:
 
 ---
 
-## Components
+## 🧩 Components
 
 | File | Description |
 |------|--------------|
@@ -170,7 +149,7 @@ Modes:
 
 ---
 
-## Folder Structure
+## 📂 Folder Structure
 
 ```
 project_root/
@@ -190,7 +169,7 @@ project_root/
 
 ---
 
-## Dependencies
+## 🧰 Dependencies
 
 - Python ≥ 3.10  
 - DuckDB ≥ 1.4  
@@ -200,7 +179,7 @@ project_root/
 
 ---
 
-## License
+## ⚖️ License
 
 MIT License — free to use, modify, and distribute with attribution.
 
