@@ -20,23 +20,6 @@ from test import run_tests  # type: ignore
 
 
 # -----------------------
-# Internal utilities
-# -----------------------
-def _parse_days(value):
-    """
-    Validate that --older-than is an integer number of days.
-    Returns a string like '7 days' for safe SQL interpolation.
-    """
-    try:
-        days = int(value)
-        if days <= 0:
-            raise ValueError
-    except ValueError:
-        raise SystemExit("ERROR: --older-than must be a positive integer number of days (e.g., 7).")
-    return f"{days} days"
-
-
-# -----------------------
 # Modes
 # -----------------------
 def run_test():

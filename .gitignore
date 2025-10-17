@@ -1,17 +1,10 @@
 # ------------------------------------------------------------------------------
-# Docker / Compose
+# Data files
 # ------------------------------------------------------------------------------
-# Container state
-*.pid
-*.seed
-*.swp
-
-# Logs from containers
-*.log
-docker-compose.override.yml
-
-ducklake/
-parquet/
+ducklake/data_files/*
+ducklake/metadata_catalog.ducklake
+parquet/webcrawl_data/*
+parquet/index/*
 # ------------------------------------------------------------------------------
 # General system / dev noise
 # ------------------------------------------------------------------------------
