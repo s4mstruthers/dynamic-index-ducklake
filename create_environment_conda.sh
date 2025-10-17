@@ -10,8 +10,11 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 
 if conda env list | grep -qE "^\s*${ENV_NAME}\s"; then
-  if $REINSTALL; then conda remove -y -n "$ENV_NAME" --all
-  else echo "Env exists. Use --reinstall."; exit 0
+  if $REINSTALL; then
+    conda remove -y -n "$ENV_NAME" --all
+  else
+    echo "Env exists. Use --reinstall."
+    exit 0
   fi
 fi
 
@@ -19,12 +22,8 @@ echo "Creating conda env (latest Python)…"
 conda create -y -n "$ENV_NAME" python
 
 echo "Installing packages…"
-# Prefer conda-forge for current versions
 conda run -n "$ENV_NAME" conda install -y -c conda-forge \
   "duckdb>=1.4.1" numpy pyarrow
-
-# OPTIONAL: also install CLI if you want the shell tool
-# conda run -n "$ENV_NAME" conda install -y -c conda-forge duckdb-cli
 
 echo "Verifying…"
 conda run --no-capture-output -n "$ENV_NAME" python - <<'EOF'
@@ -39,4 +38,20 @@ EOF
 # If CLI was installed, you can also check:
 # conda run --no-capture-output -n "$ENV_NAME" duckdb --version
 
+echo "Creating project directories…"
+# Creates:
+# - ducklake/
+# - ducklake/data_files/
+# - parquet/
+# - parquet/index/
+# - parquet/webcrawl_data/
+mkdir -p \
+  "ducklake/data_files" \
+  "parquet/index" \
+  "parquet/webcrawl_data"
+
 echo "Environment '$ENV_NAME' ready. Activate: conda activate $ENV_NAME"
+echo "Created directories:"
+echo "  ./ducklake/data_files"
+echo "  ./parquet/index"
+echo "  ./parquet/webcrawl_data"
