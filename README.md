@@ -1,6 +1,6 @@
 # DuckLake Dynamic Indexing System
 
-A production-ready, programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
+A programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
 It supports **incremental imports**, **deterministic reindexing**, and **BM25** ranking over large corpora.
 
 ---
