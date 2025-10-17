@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-ENV_NAME="dynamic-index"
+ENV_NAME="dynamic-index-ducklake"
 REINSTALL=false
 if [[ "${1:-}" == "--reinstall" ]]; then REINSTALL=true; fi
 
