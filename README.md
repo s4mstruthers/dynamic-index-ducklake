@@ -16,7 +16,6 @@ It supports **incremental imports**, **deterministic reindexing**, and **BM25** 
 - [BM25 Details](#bm25-details)
 - [Architecture](#architecture)
 - [Folder Layout](#folder-layout)
-- [Troubleshooting](#troubleshooting)
 - [License](#license)
 
 ---
