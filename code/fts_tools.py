@@ -1,18 +1,29 @@
 # fts_tools.py
+# BM25 query runners over DuckLake-backed index (dict/docs/postings).
+# Provides conjunctive (AND) and disjunctive (OR) semantics.
 
 from helper_functions import tokenize_query
 
-
+# ---------------------------------------------------------------------
+# BM25 (AND semantics)
+# ---------------------------------------------------------------------
 def conjunctive_bm25(con, query, top_n):
     """
-    BM25 (AND semantics): only documents that contain ALL query terms are scored/returned.
-    Returns: list[(docid, score)] ordered by score desc, length <= top_n.
+    Rank only documents that contain ALL query terms (conjunctive/AND).
+
+    Notes:
+      - Uses a TEMP table for the current query's termids to keep SQL legible.
+      - BM25 parameters (k1, b) are constants here to ensure reproducibility.
+      - Drops the TEMP table on exit to avoid leaking state across queries.
+
+    Returns:
+      list[(docid:int, score:float)] ordered by descending score (<= top_n).
     """
     termids = tokenize_query(con, query)
     if not termids:
         return []
 
-    # Temporary query term table
+    # Maintain isolation across queries
     con.execute("DROP TABLE IF EXISTS query_terms")
     con.execute("CREATE TEMP TABLE query_terms(termid BIGINT)")
     con.executemany("INSERT INTO query_terms VALUES (?)", [(t,) for t in termids])
@@ -22,27 +33,28 @@ def conjunctive_bm25(con, query, top_n):
 
     rows = con.execute(
         """
-        /* ----------------------------------------------------------------------
-           Compute BM25 scores for documents that contain ALL query terms.
-           BM25(D,Q) = SUM_over_t_in_Q [ idf(t) * tf_norm(t,D) ]
-        ---------------------------------------------------------------------- */
+        /* ---------------------------------------------------------------
+           BM25(D,Q) with AND semantics:
+           - Restrict to docs that contain ALL query terms (conjunctive).
+           - Compute corpus stats once and reuse across scoring.
+        ---------------------------------------------------------------- */
 
         WITH corpus_stats AS (
           SELECT
             COUNT(*)::DOUBLE AS N,
-            AVG(docs.len)::DOUBLE AS avgdl
-          FROM my_ducklake.docs AS docs
+            AVG(d.len)::DOUBLE AS avgdl
+          FROM my_ducklake.docs AS d
         ),
 
         term_hits AS (
           SELECT
-            postings.docid AS docid,
-            postings.termid AS termid,
-            postings.tf::DOUBLE AS tf,
-            docs.len::DOUBLE AS len
-          FROM my_ducklake.postings AS postings
-          JOIN my_ducklake.docs AS docs ON docs.docid = postings.docid
-          WHERE postings.termid IN (SELECT termid FROM query_terms)
+            p.docid     AS docid,
+            p.termid    AS termid,
+            p.tf::DOUBLE AS tf,
+            d.len::DOUBLE AS len
+          FROM my_ducklake.postings AS p
+          JOIN my_ducklake.docs AS d ON d.docid = p.docid
+          WHERE p.termid IN (SELECT termid FROM query_terms)
         ),
 
         conjunctive_documents AS (
@@ -86,17 +98,24 @@ def conjunctive_bm25(con, query, top_n):
     con.execute("DROP TABLE IF EXISTS query_terms")
     return [(row[0], float(row[1])) for row in rows]
 
-
+# ---------------------------------------------------------------------
+# BM25 (OR semantics)
+# ---------------------------------------------------------------------
 def disjunctive_bm25(con, query, top_n):
     """
-    BM25 (OR semantics): documents that contain ANY query term are scored/returned.
-    Returns: list[(docid, score)] ordered by score desc, length <= top_n.
+    Rank documents that contain ANY query term (disjunctive/OR).
+
+    Notes:
+      - TEMP table holds current query termids for clarity and safety.
+      - BM25 parameters (k1, b) fixed to avoid config drift across runs.
+
+    Returns:
+      list[(docid:int, score:float)] ordered by descending score (<= top_n).
     """
     termids = tokenize_query(con, query)
     if not termids:
         return []
 
-    # Temporary query term table
     con.execute("DROP TABLE IF EXISTS query_terms")
     con.execute("CREATE TEMP TABLE query_terms(termid BIGINT)")
     con.executemany("INSERT INTO query_terms VALUES (?)", [(t,) for t in termids])
@@ -106,27 +125,27 @@ def disjunctive_bm25(con, query, top_n):
 
     rows = con.execute(
         """
-        /* ----------------------------------------------------------------------
-           Compute BM25 scores for documents that contain ANY query term.
-           BM25(D,Q) = SUM_over_t_in_Q [ idf(t) * tf_norm(t,D) ]
-        ---------------------------------------------------------------------- */
+        /* ---------------------------------------------------------------
+           BM25(D,Q) with OR semantics:
+           - Consider any doc containing at least one query term.
+        ---------------------------------------------------------------- */
 
         WITH corpus_stats AS (
           SELECT
             COUNT(*)::DOUBLE AS N,
-            AVG(docs.len)::DOUBLE AS avgdl
-          FROM my_ducklake.docs AS docs
+            AVG(d.len)::DOUBLE AS avgdl
+          FROM my_ducklake.docs AS d
         ),
 
         term_hits AS (
           SELECT
-            postings.docid AS docid,
-            postings.termid AS termid,
-            postings.tf::DOUBLE AS tf,
-            docs.len::DOUBLE AS len
-          FROM my_ducklake.postings AS postings
-          JOIN my_ducklake.docs AS docs ON docs.docid = postings.docid
-          WHERE postings.termid IN (SELECT termid FROM query_terms)
+            p.docid     AS docid,
+            p.termid    AS termid,
+            p.tf::DOUBLE AS tf,
+            d.len::DOUBLE AS len
+          FROM my_ducklake.postings AS p
+          JOIN my_ducklake.docs AS d ON d.docid = p.docid
+          WHERE p.termid IN (SELECT termid FROM query_terms)
         ),
 
         idf_table AS (
@@ -162,14 +181,23 @@ def disjunctive_bm25(con, query, top_n):
     con.execute("DROP TABLE IF EXISTS query_terms")
     return [(row[0], float(row[1])) for row in rows]
 
-
-# -----------------------
-# Query helpers (BM25)
-# -----------------------
+# ---------------------------------------------------------------------
+# Query Orchestration
+# ---------------------------------------------------------------------
 def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"):
     """
-    Execute a BM25 query (conjunctive/disjunctive) and print a ranked list.
-    Always shows raw BM25 scores.
+    Execute a BM25 query (conjunctive/disjunctive) and pretty-print results.
+
+    Parameters:
+      - con: DuckDB connection (already attached to `my_ducklake`).
+      - query: raw string query (tokenized and mapped to termids).
+      - top_n: max results to return.
+      - show_content: include a short content snippet for each doc.
+      - qtype: 'conjunctive' (AND) or 'disjunctive' (OR).
+
+    Prints:
+      - Ranking header
+      - Per-result line: rank, docid, BM25 score, optional snippet
     """
     if qtype == "conjunctive":
         from fts_tools import conjunctive_bm25 as bm25_runner

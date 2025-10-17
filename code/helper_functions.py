@@ -1,8 +1,15 @@
 from pathlib import Path
 import re
+import os
+
 # ---------------------------------------------------------------------
-# Paths (project layout constants)
+# Project Path Constants
 # ---------------------------------------------------------------------
+# Defines fixed directories relative to project layout.
+# BASE_DIR -> /code/
+# DUCKLAKE_FOLDER -> /ducklake/
+# PARQUET_FOLDER -> /parquet/
+# TEST_FOLDER -> /test/
 BASE_DIR = Path(__file__).resolve().parent
 DUCKLAKE_FOLDER = BASE_DIR.parent / "ducklake"
 DUCKLAKE_DATA = DUCKLAKE_FOLDER / "data_files"
@@ -11,75 +18,54 @@ TEST_FOLDER = BASE_DIR.parent / "test"
 PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 
 # ---------------------------------------------------------------------
-# DuckLake attach / extensions
+# DuckLake Catalog Attachment
 # ---------------------------------------------------------------------
-import os
-
 def connect_ducklake(con):
     """
-    Attach the DuckLake catalog as `my_ducklake` and load required extensions.
-    If the metadata catalog doesn't exist, create it first.
+    Attach (or create) the DuckLake catalog as `my_ducklake`.
 
-    Notes:
-    - Automatically creates the metadata catalog if missing.
-    - Uses f-strings only for controlled paths (constants).
+    - Ensures directories exist before attaching.
+    - Automatically installs and loads required DuckDB extensions.
+    - ATTACH creates the catalog if the file does not yet exist.
     """
-    # Ensure DuckLake extension is available
-    con.execute("INSTALL ducklake; LOAD ducklake;")
+    DUCKLAKE_DATA.mkdir(parents=True, exist_ok=True)
 
-    # Ensure FTS extension is available (if you use it)
-    con.execute("INSTALL fts; LOAD fts;")
+    # Load required extensions
+    con.execute("INSTALL ducklake; LOAD ducklake;")
 
     metadata_path = DUCKLAKE_METADATA.as_posix()
     data_path = DUCKLAKE_DATA.as_posix()
 
-    # Create the DuckLake catalog if it doesn't exist
-    if not os.path.exists(metadata_path):
-        print(f"[INFO] Creating new DuckLake catalog at {metadata_path}")
-        con.execute(
-            f"CREATE DUCKLAKE '{metadata_path}' (DATA_PATH '{data_path}');"
-        )
-
-    # Attach the existing (or just-created) catalog
+    # ATTACH creates or opens the DuckLake catalog
     con.execute(
         f"ATTACH 'ducklake:{metadata_path}' AS my_ducklake (DATA_PATH '{data_path}');"
     )
+    con.execute("USE my_ducklake;")
 
 # ---------------------------------------------------------------------
-# Sanity inspection (still useful during development)
+# Sanity Inspection / Diagnostics
 # ---------------------------------------------------------------------
 def test_ducklake(con):
     """
-    Schema + sample rows + storage diagnostics for DuckLake tables.
-    Helps explain large on-disk size by listing fragments and snapshots.
+    Inspect schema and preview table contents for DuckLake tables.
+    Used for debugging schema correctness and verifying attach success.
     """
     con.execute("USE my_ducklake")
 
-    # ---------------- Schema + top-2 -------------------------------
-    describe = con.execute("DESCRIBE my_ducklake.dict").fetch_df()
-    print("Describe dict:\n", describe, "\n")
-    top_dict = con.execute("SELECT * FROM my_ducklake.dict LIMIT 2").fetch_df()
-    print("Top 2 rows in dict:\n", top_dict, "\n")
-
-    describe = con.execute("DESCRIBE my_ducklake.docs").fetch_df()
-    print("Describe docs:\n", describe, "\n")
-    top_docs = con.execute("SELECT * FROM my_ducklake.docs LIMIT 2").fetch_df()
-    print("Top 2 rows in docs:\n", top_docs, "\n")
-
-    describe = con.execute("DESCRIBE my_ducklake.postings").fetch_df()
-    print("Describe postings:\n", describe, "\n")
-    top_post = con.execute("SELECT * FROM my_ducklake.postings LIMIT 2").fetch_df()
-    print("Top 2 rows in postings:\n", top_post, "\n")
-
-    
+    for tbl in ["dict", "docs", "postings"]:
+        print(f"Describe {tbl}:")
+        print(con.execute(f"DESCRIBE my_ducklake.{tbl}").fetch_df(), "\n")
+        print(f"Top 2 rows in {tbl}:")
+        print(con.execute(f"SELECT * FROM my_ducklake.{tbl} LIMIT 2").fetch_df(), "\n")
 
 # ---------------------------------------------------------------------
-# Lookups used by tokenize_query (the only per-term lookup we still need)
+# Query Utilities
 # ---------------------------------------------------------------------
 def get_termid(con, term):
     """
-    Return termid for a given term from my_ducklake.dict, or None if missing.
-    Parameterized to avoid injection; term is a Python string.
+    Retrieve the termid for a given term from `my_ducklake.dict`.
+    Returns None if the term is not present.
+    Uses parameterized query to prevent SQL injection.
     """
     row = con.execute(
         "SELECT termid FROM my_ducklake.dict WHERE term = ?",
@@ -88,18 +74,15 @@ def get_termid(con, term):
     return row[0] if row else None
 
 # ---------------------------------------------------------------------
-# Tokenization helpers
+# Tokenization Utilities
 # ---------------------------------------------------------------------
-# precompiled regex: match contiguous alphabetic sequences
 _WORD_RE = re.compile(r"[A-Za-z]+")
 
 def tokenize(content: str) -> list[str]:
     """
-    Extract lowercase alphabetic words from `content`.
-    Digits, punctuation, and symbols are ignored.
-    Returns a list of terms (str).
-    Example:
-        "AI-driven systems (2025)!" -> ["ai", "driven", "systems"]
+    Tokenize input text into lowercase alphabetic terms.
+    Non-alphabetic characters are ignored.
+    Example: "AI-driven systems (2025)!" → ["ai", "driven", "systems"]
     """
     if not content:
         return []
@@ -107,31 +90,55 @@ def tokenize(content: str) -> list[str]:
 
 def tokenize_query(con, query):
     """
-    Tokenize a raw query string and map to existing termids.
-    Unknown terms are dropped. Returns a list[int-like].
+    Tokenize a query string and map known tokens to termids.
+    Terms not found in `dict` are discarded.
     """
     tokens = tokenize(query)
-    # Inline walrus: lookup each token's termid, keep non-None
-    termids = [tid for term in tokens if (tid := get_termid(con, term)) is not None]
-    return termids
+    return [tid for term in tokens if (tid := get_termid(con, term)) is not None]
 
 # ---------------------------------------------------------------------
-# Data ingest / upsert
+# Data Ingest / Initialization
 # ---------------------------------------------------------------------
 def initialise_data(con, parquet="metadata_0.parquet", limit=None):
     """
-    Create or replace my_ducklake.data from a source Parquet.
+    Create or replace `my_ducklake.data` from one or more Parquet files.
 
-    - Safe and parameterized: uses read_parquet(?) for the path and LIMIT ?.
-    - Drops any existing data table first to guarantee a clean base.
-    - Applies ORDER BY docid for deterministic ingest.
-    - Optional `limit` for reduced initial loads.
+    Supported 'parquet' inputs:
+      - File name within /parquet/webcrawl_data/
+      - Absolute or relative path to a single file
+      - Directory path (imports all *.parquet files)
+      - 'ALL' or '*' to import all files in /parquet/webcrawl_data/
+
+    Ensures deterministic ordering by docid and optional row limiting.
     """
-    src = (PARQUET_FOLDER / "webcrawl_data" / parquet).resolve().as_posix()
-
     con.execute("USE my_ducklake")
+
+    webcrawl_dir = (PARQUET_FOLDER / "webcrawl_data").resolve()
+    parquet_arg = str(parquet).strip() if parquet else "ALL"
+
+    # Resolve file or directory source
+    if parquet_arg.upper() in {"ALL", "*"}:
+        src = (webcrawl_dir / "*.parquet").as_posix()
+    else:
+        p = Path(parquet_arg)
+        if p.is_absolute():
+            src = (p / "*.parquet").as_posix() if p.is_dir() else p.as_posix()
+        else:
+            candidate = (webcrawl_dir / parquet_arg).resolve()
+            if candidate.exists():
+                src = (candidate / "*.parquet").as_posix() if candidate.is_dir() else candidate.as_posix()
+            else:
+                p2 = Path(parquet_arg).resolve()
+                if p2.exists() and p2.is_file():
+                    src = p2.as_posix()
+                elif p2.exists() and p2.is_dir():
+                    src = (p2 / "*.parquet").as_posix()
+                else:
+                    raise SystemExit(f"ERROR: Could not resolve parquet input: {parquet_arg}")
+
     con.execute("DROP TABLE IF EXISTS data")
 
+    # Create the data table (glob patterns supported by DuckDB)
     if limit is None:
         con.execute(
             """
@@ -158,9 +165,15 @@ def initialise_data(con, parquet="metadata_0.parquet", limit=None):
             [src, int(limit)],
         )
 
+# ---------------------------------------------------------------------
+# Incremental Import / Upsert
+# ---------------------------------------------------------------------
 def import_data(con, parquet):
     """
-    Upsert from Parquet using MERGE INTO (DuckLake). Path is parameterized.
+    Upsert Parquet data into `my_ducklake.data` via MERGE INTO.
+
+    - Updates content if docid already exists.
+    - Inserts new rows if docid not found.
     """
     src = (BASE_DIR.parent / "parquet" / parquet).resolve().as_posix()
 
@@ -172,7 +185,6 @@ def import_data(con, parquet):
         )
     """)
 
-    # NOTE: VALUES (...) is required on the INSERT branch.
     con.execute("""
         MERGE INTO data AS target
         USING (
@@ -186,69 +198,76 @@ def import_data(con, parquet):
         WHEN NOT MATCHED THEN INSERT (docid, content)
         VALUES (source.docid, source.content)
     """, [src])
-# -----------------------
-# DuckLake maintenance: cleanup
-# -----------------------
+
+# ---------------------------------------------------------------------
+# DuckLake Maintenance / Cleanup
+# ---------------------------------------------------------------------
 def cleanup_old_files(con, older_than_days=7, dry_run=True, all_files=False):
     """
-    Delete files that DuckLake has scheduled for deletion (expired snapshots).
-    Safer default: dry_run=True. Set all_files=True to ignore the 'older_than' filter.
+    Remove files that DuckLake scheduled for deletion (expired snapshots).
+
+    Parameters:
+      - older_than_days: Age threshold for cleanup.
+      - dry_run: Only list files to be deleted (no changes).
+      - all_files: Ignore the threshold and clean all eligible files.
     """
     try:
         days = int(older_than_days)
         if days <= 0:
             raise ValueError
     except Exception:
-        raise SystemExit("ERROR: older_than_days must be a positive integer (days).")
-    interval = f"{days} days"
+        raise SystemExit("ERROR: older_than_days must be a positive integer.")
 
+    interval = f"{days} days"
     con.execute("USE my_ducklake")
 
     if all_files:
         con.execute("CALL ducklake_cleanup_old_files('my_ducklake', cleanup_all => true)")
-        print("Cleanup (scheduled-for-deletion, ALL files) executed.")
+        print("Executed cleanup of all scheduled-for-deletion files.")
         return
 
     if dry_run:
         con.execute(
             f"CALL ducklake_cleanup_old_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
         )
-        print(f"Cleanup DRY RUN (scheduled-for-deletion, older_than={interval}) listed files.")
+        print(f"Dry run: listed scheduled deletions older than {interval}.")
     else:
         con.execute(
             f"CALL ducklake_cleanup_old_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
         )
-        print(f"Cleanup (scheduled-for-deletion, older_than={interval}) executed.")
-
+        print(f"Deleted scheduled files older than {interval}.")
 
 def cleanup_orphaned_files(con, older_than_days=7, dry_run=True, all_files=False):
     """
-    Delete orphaned files (untracked by DuckLake). Safer default: dry_run=True.
-    Set all_files=True to ignore the 'older_than' filter.
+    Remove orphaned (untracked) data files from the DuckLake DATA_PATH.
+
+    Parameters mirror cleanup_old_files:
+      - older_than_days: Age threshold for cleanup.
+      - dry_run: Only list files to be deleted.
+      - all_files: Delete all orphans regardless of age.
     """
     try:
         days = int(older_than_days)
         if days <= 0:
             raise ValueError
     except Exception:
-        raise SystemExit("ERROR: older_than_days must be a positive integer (days).")
-    interval = f"{days} days"
+        raise SystemExit("ERROR: older_than_days must be a positive integer.")
 
+    interval = f"{days} days"
     con.execute("USE my_ducklake")
 
     if all_files:
         con.execute("CALL ducklake_delete_orphaned_files('my_ducklake', cleanup_all => true)")
-        print("Cleanup (orphans, ALL files) executed.")
+        print("Executed cleanup of all orphaned files.")
         return
 
     if dry_run:
         con.execute(
             f"CALL ducklake_delete_orphaned_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
         )
-        print(f"Cleanup DRY RUN (orphans, older_than={interval}) listed files.")
+        print(f"Dry run: listed orphaned files older than {interval}.")
     else:
         con.execute(
             f"CALL ducklake_delete_orphaned_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
         )
-        print(f"Cleanup (orphans, older_than={interval}) executed.")
-
+        print(f"Deleted orphaned files older than {interval}.")

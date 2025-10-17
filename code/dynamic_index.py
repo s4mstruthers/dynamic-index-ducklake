@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# dynamic_index.py
+# Command-line entrypoint for DuckLake-backed BM25 indexing/search.
+# Orchestrates attach, ingest, reindex, query, cleanup, and tests.
+
 import argparse
 import duckdb
 
@@ -19,27 +23,43 @@ from index_tools import reindex, delete
 from test import run_tests  # type: ignore
 
 
-# -----------------------
-# Modes
-# -----------------------
+# ---------------------------------------------------------------------
+# Mode runners
+# ---------------------------------------------------------------------
 def run_test():
+    """Execute internal test suite (functional smoke tests)."""
     run_tests()
 
 
 def run_sanity():
+    """Attach DuckLake and print schema/row previews for core tables."""
     con = duckdb.connect()
     connect_ducklake(con)
     test_ducklake(con)
 
 
 def run_query(query, top_n=10, show_content=False, qtype="disjunctive"):
+    """
+    Run a BM25 query with AND/OR semantics.
+
+    Parameters:
+      - query: raw user query string
+      - top_n: max results to show
+      - show_content: append content snippet to each result
+      - qtype: 'conjunctive' (AND) or 'disjunctive' (OR)
+    """
     con = duckdb.connect()
     connect_ducklake(con)
     run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype)
 
 
 def run_import(parquet):
-    """Upsert content only (DuckLake MERGE). Does NOT rebuild the index."""
+    """
+    Upsert content only into `my_ducklake.data` (no index rebuild).
+
+    Intended for incremental updates; follow with `--mode reindex`
+    if you need postings/dict updates.
+    """
     con = duckdb.connect()
     connect_ducklake(con)
     import_data(con, parquet)
@@ -47,7 +67,13 @@ def run_import(parquet):
 
 
 def run_initialise(parquet, limit):
-    """Drop/recreate my_ducklake.data from the source parquet (with optional limit), then rebuild dict/docs/postings."""
+    """
+    Rebuild base data then reindex.
+
+    - Drops and recreates `my_ducklake.data` from the provided parquet source.
+    - Supports single file, directory, or ALL via helper.
+    - Triggers full index rebuild (dict/docs/postings).
+    """
     con = duckdb.connect()
     connect_ducklake(con)
     initialise_data(con, parquet=parquet, limit=limit)
@@ -57,7 +83,7 @@ def run_initialise(parquet, limit):
 
 
 def run_reindex():
-    """Rebuild dict/docs/postings from current my_ducklake.data."""
+    """Rebuild dict/docs/postings from current `my_ducklake.data`."""
     con = duckdb.connect()
     connect_ducklake(con)
     reindex(con)
@@ -65,12 +91,24 @@ def run_reindex():
 
 
 def run_cleanup(older_than_days=7, dry_run=True, all_files=False):
+    """
+    Remove files scheduled for deletion by DuckLake retention.
+
+    - older_than_days: threshold for eligible files
+    - dry_run: list-only
+    - all_files: ignore threshold and clean everything eligible
+    """
     con = duckdb.connect()
     connect_ducklake(con)
     cleanup_old_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
 
 
 def run_cleanup_orphans(older_than_days=7, dry_run=True, all_files=False):
+    """
+    Remove orphaned (untracked) files from the DuckLake DATA_PATH.
+
+    Parameters mirror run_cleanup.
+    """
     con = duckdb.connect()
     connect_ducklake(con)
     cleanup_orphaned_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
@@ -78,7 +116,10 @@ def run_cleanup_orphans(older_than_days=7, dry_run=True, all_files=False):
 
 def run_delete(docid):
     """
-    Delete one document (docid) from data/docs/postings and adjust dict.df accordingly.
+    Delete one document and cascade updates to index structures.
+
+    - Removes from data/docs/postings
+    - Adjusts dict.df accordingly
     """
     con = duckdb.connect()
     connect_ducklake(con)
@@ -86,9 +127,9 @@ def run_delete(docid):
     print(f"Deleted docid={docid} from my_ducklake (data/docs/postings; dict.df adjusted).")
 
 
-# -----------------------
+# ---------------------------------------------------------------------
 # CLI
-# -----------------------
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="DuckLake dynamic index tooling")
     ap.add_argument(
