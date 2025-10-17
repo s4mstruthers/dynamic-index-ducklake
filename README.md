@@ -5,7 +5,37 @@ It enables incremental data imports, efficient reindexing, and flexible BM25-bas
 
 ---
 
-## Project Overview
+## 🚀 Quick Start
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/s4mstruthers/dynamic-index-ducklake.git
+cd dynamic-index-ducklake
+```
+
+### 2. Create the Environment
+Use the provided setup script to create a Conda environment and directory structure.
+
+```bash
+chmod +x create_dynamic_index_env.sh
+./create_dynamic_index_env.sh
+# Or to reinstall cleanly:
+# ./create_dynamic_index_env.sh --reinstall
+```
+
+### 3. Activate the Environment
+```bash
+conda activate dynamic-index-ducklake
+```
+
+### 4. Run a Sanity Test
+```bash
+python dynamic_index.py --mode sanity
+```
+
+---
+
+## 📖 Project Overview
 
 The system consists of modular Python components for indexing, querying, and managing document data. 
 It leverages DuckLake as the metadata catalog and DuckDB’s analytics engine for storage and retrieval.
@@ -15,129 +45,83 @@ It leverages DuckLake as the metadata catalog and DuckDB’s analytics engine fo
 | File | Description |
 |------|--------------|
 | `dynamic_index.py` | CLI entry point — handles import, indexing, querying, deletion, cleanup. |
-| `helper_functions.py` | Provides utilities for tokenization, connecting to DuckLake, and I/O management. |
-| `index_tools.py` | Implements index building (dictionary, documents, postings), and reindexing logic. |
-| `fts_tools.py` | Provides BM25-based full-text search functions with conjunctive (AND) and disjunctive (OR) modes. |
-| `test.py` | Contains functional test routines for validating setup and indexing. |
+| `helper_functions.py` | Utilities for tokenization, connecting to DuckLake, and I/O management. |
+| `index_tools.py` | Implements index building (dictionary, documents, postings) and reindexing logic. |
+| `fts_tools.py` | BM25-based full-text search functions (AND/OR modes). |
+| `test.py` | Functional test routines for validating setup and indexing. |
 
 ---
 
-## Key Concepts
+## 🧠 Key Concepts
 
 ### DuckLake Catalog
 
-The metadata catalog (e.g. `metadata_catalog.ducklake`) stores schema definitions and pointers to data files.
+The metadata catalog (`metadata_catalog.ducklake`) stores schema definitions and pointers to data files.  
+If it doesn’t exist, the system automatically creates one:
 
-If it doesn’t exist, the system automatically creates one using:
 ```sql
 CREATE DUCKLAKE 'metadata_catalog.ducklake' (DATA_PATH 'data/');
 ```
 
 ### Index Structure
 
-The system builds three main tables:
-
 | Table | Description |
 |--------|-------------|
-| `dict` | Contains unique terms (`termid`, `term`, `df`) |
-| `docs` | Contains documents (`docid`, `len`) |
-| `postings` | Contains postings (`termid`, `docid`, `tf`) |
-
-These are stored as Parquet files and imported back into DuckLake.
+| `dict` | Unique terms (`termid`, `term`, `df`) |
+| `docs` | Documents (`docid`, `len`) |
+| `postings` | Postings (`termid`, `docid`, `tf`) |
 
 ---
 
-## Functionality
+## ⚙️ Functionality
 
 ### 1. Initialise
-Create and index a dataset from a source Parquet file.
-
 ```bash
 python dynamic_index.py --mode initialise --parquet extra/metadata_0.parquet
 ```
 
-This:
-1. Imports all rows from the Parquet file into `my_ducklake.main.data`
-2. Tokenizes text content
-3. Builds dict/docs/postings Parquet files
-4. Imports those into DuckLake tables
+Imports data, tokenizes content, builds Parquets, and registers them in DuckLake.
 
----
-
-### 2. Import (Incremental Update)
-Add or update documents from a Parquet file without rebuilding the index.
-
+### 2. Import (Incremental)
 ```bash
 python dynamic_index.py --mode import --parquet extra/metadata_1.parquet
 ```
 
----
-
 ### 3. Reindex
-Rebuild the index from existing data.
-
 ```bash
 python dynamic_index.py --mode reindex
 ```
 
----
-
 ### 4. Query
-Perform BM25 ranking queries (with AND/OR semantics).
-
-**Disjunctive (default, OR semantics):**
+**Disjunctive (OR):**
 ```bash
 python dynamic_index.py --mode query --q "machine learning"
 ```
-
-**Conjunctive (AND semantics):**
+**Conjunctive (AND):**
 ```bash
 python dynamic_index.py --mode query --q "deep learning" --qtype conjunctive
 ```
 
-Each result shows document ID, score, and optionally content preview (`--show-content`).
-
----
-
 ### 5. Delete
-Remove a single document (and all related postings).
-
 ```bash
 python dynamic_index.py --mode delete --docid 17998
 ```
 
-Automatically updates dictionary statistics (`df`).
-
----
-
 ### 6. Cleanup
-Remove old or orphaned data files.
-
 ```bash
 python dynamic_index.py --mode cleanup --older-than 7 --dry-run
 ```
 
-Or to remove orphans only:
+### 7. Test
 ```bash
-python dynamic_index.py --mode cleanup-orphans
-```
-
----
-
-### 7. Sanity / Test Modes
-
-Check setup or run internal tests.
-
-```bash
-python dynamic_index.py --mode sanity
 python dynamic_index.py --mode test
 ```
 
 ---
 
-## BM25 Querying (fts_tools.py)
+## 🔍 BM25 Querying
 
-BM25 computes relevance using:
+BM25 formula:
 ```
 score(D, Q) = Σ_t∈Q idf(t) * ((k1 + 1) * f(t, D)) / (f(t, D) + k1 * (1 - b + b * (len(D) / avgdl)))
 ```
@@ -146,12 +130,12 @@ with:
 - `k1 = 1.2`, `b = 0.75`
 
 Modes:
-- **Conjunctive**: only documents containing *all* query terms are returned.
-- **Disjunctive**: any document containing *any* query term is scored.
+- **Conjunctive** → documents with all query terms
+- **Disjunctive** → documents with any query term
 
 ---
 
-## Architecture
+## 🏗 Architecture
 
 ```
 Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/postings → import_index_parquets_into_ducklake
@@ -159,55 +143,25 @@ Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/posti
 
 | Step | Action | Source | Destination |
 |------|--------|---------|-------------|
-| 1 | Stream all data | `my_ducklake.main.data` | Python memory |
-| 2 | Tokenize and compute TF/DF | Python | `DataFrame` |
+| 1 | Stream data | `my_ducklake.main.data` | Python memory |
+| 2 | Tokenize + compute TF/DF | Python | DataFrame |
 | 3 | Save Parquets | pandas → Parquet | Disk |
-| 4 | Import into DuckLake | DuckDB SQL | my_ducklake tables |
+| 4 | Import to DuckLake | DuckDB SQL | DuckLake tables |
 
 ---
 
-## Dependencies
+## 🧩 Dependencies
 
-- Python ≥ 3.10
-- DuckDB ≥ 1.4
-- DuckLake extension
-- pandas
-- spaCy (for tokenization)
-- pyarrow / fastparquet
-
----
-
-## Example Query Output
-
-```
-Top 5 for disjunctive BM25 query: 'machine learning' (raw BM25 scores)
- 1. docid=42   score=9.128390  |  'Machine learning is a field of artificial intelligence...'
- 2. docid=103  score=8.447201  |  'Deep learning techniques are subsets of machine learning...'
- 3. docid=7    score=6.893223  |  'Supervised learning algorithms use labeled data...'
-```
+- Python ≥ 3.10  
+- DuckDB ≥ 1.4  
+- DuckLake extension  
+- pandas  
+- spaCy  
+- pyarrow / fastparquet  
 
 ---
 
-## Maintenance Notes
-
-- Old `.ducklake` or `.parquet` files can be pruned using cleanup modes.
-- If index corruption occurs, simply run:
-  ```bash
-  python dynamic_index.py --mode reindex
-  ```
-- For best performance on large datasets, ensure `PARQUET_ENGINE='pyarrow'` and `PARQUET_COMPRESSION='zstd'`.
-
----
-
-## Tips for Large-Scale Use
-
-- Use `PRAGMA threads=<n>` to leverage all CPU cores.
-- Keep `BATCH_SIZE` high (e.g. 10,000) in `_iter_data()` for minimal roundtrips.
-- Avoid scaling BM25 scores; they are raw and proportional to true relevance.
-
----
-
-## Folder Structure
+## 📂 Folder Structure
 
 ```
 project_root/
@@ -219,30 +173,20 @@ project_root/
 │   ├── test.py
 ├── ducklake/
 │   ├── data_files/
-|   |   ├── data/
-|   |   ├── dict/
-|   |   ├── docs/
-|   |   ├── postings/
 │   └── metadata_catalog.ducklake
 ├── parquet/
-|   ├── index/
-│   |   ├── dict.parquet
-│   |   ├── docs.parquet
-│   |   ├── postings.parquet
+│   ├── index/
 │   ├── webcrawl_data/
-|   |   ├── metadata_0.parquet
-|   |   ├── metadata_1.parquet
-|   |   ├── ...
-
 ```
 
 ---
 
-## License
+## ⚖️ License
 
 MIT License — free to use, modify, and distribute with attribution.
 
 ---
 
 **Author:** Sam Struthers  
-**Purpose:** BSc Computer Science Thesis — Dynamic Full-Text Search with DuckLake  
+**Repository:** [https://github.com/s4mstruthers/dynamic-index-ducklake](https://github.com/s4mstruthers/dynamic-index-ducklake)  
+**Purpose:** BSc Computer Science Thesis — *Dynamic Full-Text Search with DuckLake*
