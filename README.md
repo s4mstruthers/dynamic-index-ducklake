@@ -84,7 +84,6 @@ duckdb>=1.4.1
 numpy>=1.26.0
 pyarrow>=16.0.0
 ```
-(Optionally add `duckdb[cli]>=1.4.1` to install the CLI binary into the venv.)
 
 ---
 
