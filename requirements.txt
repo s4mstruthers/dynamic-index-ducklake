@@ -1,0 +1,4 @@
+# Core dependencies
+duckdb>=1.4.1
+numpy
+pyarrow
