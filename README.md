@@ -1,6 +1,6 @@
 # DuckLake Dynamic Indexing System
 
-A production-ready, programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
+A programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
 It supports **incremental imports**, **deterministic reindexing**, and **BM25** ranking over large corpora.
 
 ---
@@ -84,7 +84,6 @@ duckdb>=1.4.1
 numpy>=1.26.0
 pyarrow>=16.0.0
 ```
-(Optionally add `duckdb[cli]>=1.4.1` to install the CLI binary into the venv.)
 
 ---
 
@@ -224,19 +223,6 @@ project_root/
 
 ---
 
-## Troubleshooting
-
-- **`Parser Error: syntax error at or near "DUCKLAKE"`**  
-  There is no `CREATE DUCKLAKE ...` command. The catalog is created by `ATTACH 'ducklake:<path>' (...).` The code already uses this pattern.
-
-- **CLI version mismatch** (e.g., `duckdb --version` shows 1.3.x but Python `duckdb.__version__` is 1.4.x):  
-  Your shell is picking a different CLI on the PATH (e.g., Homebrew). Either install `duckdb-cli` in Conda, use `python -m duckdb --version`, or upgrade your system CLI (`brew upgrade duckdb`).
-
-- **No results for queries**:  
-  Check that you ran `--mode initialise` or `--mode reindex` after importing data, and that the `dict/docs/postings` tables exist in `my_ducklake`.
-
----
-
 ## License
 
 **MIT License** — free to use, modify, and distribute with attribution.
@@ -245,4 +231,4 @@ project_root/
 
 **Author:** Sam Struthers  
 **Repository:** https://github.com/s4mstruthers/dynamic-index-ducklake  
-**Purpose:** BSc Computer Science Thesis — *Dynamic Full‑Text Search with DuckLake*
+**Purpose:** BSc Computer Science Thesis — *Dynamic Indexing with DuckLake*
