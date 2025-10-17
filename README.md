@@ -231,4 +231,4 @@ project_root/
 
 **Author:** Sam Struthers  
 **Repository:** https://github.com/s4mstruthers/dynamic-index-ducklake  
-**Purpose:** BSc Computer Science Thesis — *Dynamic Full‑Text Search with DuckLake*
+**Purpose:** BSc Computer Science Thesis — *Dynamic Indexing with DuckLake*
