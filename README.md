@@ -1,6 +1,6 @@
 # DuckLake Dynamic Indexing System
 
-A professional implementation of a **dynamic full-text indexing system** built on **DuckLake**, enabling document-level insertions, updates, and deletions without reindexing the entire corpus.
+An implementation of a **dynamic full-text indexing system** built on **DuckLake**, enabling document-level insertions, updates, and deletions without reindexing the entire corpus.
 
 This project investigates **dynamic indexing in DuckLake**, utilizing its **transactional, snapshot-based storage engine** to efficiently modify large datasets. By leveraging **ACID transactions** and **SQL-driven data operations**, it allows precise index updates and supports **document takedowns or content revisions** without disrupting overall index integrity.
 
