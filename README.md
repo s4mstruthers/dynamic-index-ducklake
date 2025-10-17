@@ -53,10 +53,6 @@ Traditional search engines often require full reindexing when the corpus changes
 
 ## System Architecture
 
-```
-Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/postings → import_index_parquets_into_ducklake
-```
-
 | Step | Action | Source | Destination |
 |------|--------|--------|-------------|
 | 1 | Load and tokenize data | Parquet | In-memory |
