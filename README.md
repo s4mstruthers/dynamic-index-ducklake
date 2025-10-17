@@ -6,7 +6,7 @@ This project investigates **dynamic indexing in DuckLake**, utilizing its **tran
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Clone the Repository
 ```bash
@@ -36,7 +36,7 @@ python code/dynamic_index.py --mode sanity
 
 ---
 
-## 📘 Overview
+## Overview
 
 This project demonstrates an **incrementally updatable full-text search index** using **DuckLake** as the underlying data catalog.  
 Traditional search engines often require full reindexing when the corpus changes. This implementation overcomes that limitation by using **transactional operations** and **snapshot isolation** provided by DuckLake.
@@ -51,7 +51,7 @@ Traditional search engines often require full reindexing when the corpus changes
 
 ---
 
-## 🧠 System Architecture
+## System Architecture
 
 ```
 Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/postings → import_index_parquets_into_ducklake
@@ -66,7 +66,7 @@ Parquet → my_ducklake.main.data → build_index_to_parquet → dict/docs/posti
 
 ---
 
-## ⚙️ Core Functionality
+## Core Functionality
 
 ### Initialise
 Rebuild the dataset and index from one or more Parquet files.
@@ -118,7 +118,7 @@ python code/dynamic_index.py --mode test
 
 ---
 
-## 🔍 BM25 Ranking Model
+## BM25 Ranking Model
 
 The BM25 ranking formula used is:
 
@@ -137,7 +137,7 @@ Modes:
 
 ---
 
-## 🧩 Components
+## Components
 
 | File | Description |
 |------|--------------|
@@ -149,7 +149,7 @@ Modes:
 
 ---
 
-## 📂 Folder Structure
+## Folder Structure
 
 ```
 project_root/
@@ -169,7 +169,7 @@ project_root/
 
 ---
 
-## 🧰 Dependencies
+## Dependencies
 
 - Python ≥ 3.10  
 - DuckDB ≥ 1.4  
@@ -179,7 +179,7 @@ project_root/
 
 ---
 
-## ⚖️ License
+## License
 
 MIT License — free to use, modify, and distribute with attribution.
 
