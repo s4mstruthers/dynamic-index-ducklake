@@ -223,19 +223,6 @@ project_root/
 
 ---
 
-## Troubleshooting
-
-- **`Parser Error: syntax error at or near "DUCKLAKE"`**  
-  There is no `CREATE DUCKLAKE ...` command. The catalog is created by `ATTACH 'ducklake:<path>' (...).` The code already uses this pattern.
-
-- **CLI version mismatch** (e.g., `duckdb --version` shows 1.3.x but Python `duckdb.__version__` is 1.4.x):  
-  Your shell is picking a different CLI on the PATH (e.g., Homebrew). Either install `duckdb-cli` in Conda, use `python -m duckdb --version`, or upgrade your system CLI (`brew upgrade duckdb`).
-
-- **No results for queries**:  
-  Check that you ran `--mode initialise` or `--mode reindex` after importing data, and that the `dict/docs/postings` tables exist in `my_ducklake`.
-
----
-
 ## License
 
 **MIT License** — free to use, modify, and distribute with attribution.
