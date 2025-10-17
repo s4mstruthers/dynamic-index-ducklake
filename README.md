@@ -1,6 +1,6 @@
 # DuckLake Dynamic Indexing System
 
-A programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
+A production-ready, programmatic **full‑text search (FTS)** pipeline built on **DuckDB + DuckLake**.  
 It supports **incremental imports**, **deterministic reindexing**, and **BM25** ranking over large corpora.
 
 ---
@@ -31,10 +31,10 @@ cd dynamic-index-ducklake/code
 
 ### 2) Create the environment (Conda)
 ```bash
-chmod +x ../create_dynamic_index_env.sh
-../create_dynamic_index_env.sh
+chmod +x ../setup.sh
+../setup.sh
 # or clean reinstall:
-# ../create_dynamic_index_env.sh --reinstall
+# ../setup.sh --reinstall
 ```
 
 ### 3) Activate
@@ -66,7 +66,7 @@ The repository includes a convenience script that:
 To run:
 ```bash
 cd dynamic-index-ducklake
-./create_dynamic_index_env.sh
+./setup.sh
 conda activate dynamic-index-ducklake
 ```
 
@@ -84,6 +84,7 @@ duckdb>=1.4.1
 numpy>=1.26.0
 pyarrow>=16.0.0
 ```
+(Optionally add `duckdb[cli]>=1.4.1` to install the CLI binary into the venv.)
 
 ---
 
@@ -162,7 +163,7 @@ python dynamic_index.py --mode cleanup --older-than 7 --dry-run
 
 # Orphaned files (untracked)
 python dynamic_index.py --mode cleanup-orphans --older-than 7 --dry-run
-``
+```
 
 ### Test / Sanity
 ```bash
