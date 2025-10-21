@@ -210,13 +210,27 @@ def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"
         return
 
     print(f"Top {len(results)} for {qtype} BM25 query: {query!r} (raw BM25 scores)")
+
+    # 1) gather ids
+    docids = [docid for docid, _ in results]
+
+    content_by_id = {}
+    if show_content and docids:
+        # 2) single batched fetch
+        placeholders = ",".join(["?"] * len(docids))
+        rows = con.execute(
+            f"SELECT docid, content FROM my_ducklake.data WHERE docid IN ({placeholders})",
+            docids,
+        ).fetchall()
+        # 3) map
+        content_by_id = {docid: content for docid, content in rows}
+
+    # 4) print with O(1) lookups
     for rank, (docid, score) in enumerate(results, 1):
         line = f"{rank:2d}. docid={docid}  score={score:.6f}"
         if show_content:
-            row = con.execute(
-                "SELECT content FROM my_ducklake.data WHERE docid = ?", (docid,)
-            ).fetchone()
-            if row and row[0] is not None:
-                snippet = str(row[0])[:160].replace("\n", " ")
+            content = content_by_id.get(docid)
+            if content is not None:
+                snippet = str(content)[:160].replace("\n", " ")
                 line += f"  |  {snippet!r}"
         print(line)
