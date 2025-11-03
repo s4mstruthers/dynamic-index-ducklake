@@ -9,3 +9,6 @@ parquet/
 # ------------------------------------------------------------------------------
 # macOS
 .DS_Store
+
+code/performance_results_*.csv
+code/queries_random_*.csv

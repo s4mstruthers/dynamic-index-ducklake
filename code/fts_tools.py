@@ -184,48 +184,49 @@ def disjunctive_bm25(con, query, top_n):
 # ---------------------------------------------------------------------
 # Query Orchestration
 # ---------------------------------------------------------------------
+import time
+
 def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"):
     """
     Execute a BM25 query (conjunctive/disjunctive) and pretty-print results.
 
-    Parameters:
-      - con: DuckDB connection (already attached to `my_ducklake`).
-      - query: raw string query (tokenized and mapped to termids).
-      - top_n: max results to return.
-      - show_content: include a short content snippet for each doc.
-      - qtype: 'conjunctive' (AND) or 'disjunctive' (OR).
-
-    Prints:
-      - Ranking header
-      - Per-result line: rank, docid, BM25 score, optional snippet
+    Returns:
+      (results, runtime_seconds)
+        - results: list[(docid:int, score:float)]
+        - runtime_seconds: float (time spent executing BM25 SQL only)
     """
     if qtype == "conjunctive":
         from fts_tools import conjunctive_bm25 as bm25_runner
     else:
         from fts_tools import disjunctive_bm25 as bm25_runner
 
+    # Measure ONLY the BM25 scoring SQL execution time
+    start_time = time.perf_counter()
     results = bm25_runner(con, query, top_n)
+    end_time = time.perf_counter()
+    runtime = end_time - start_time
+
+    # Handle case of no results early
     if not results:
         print("No results.")
-        return
+        print(f"BM25 SQL runtime: {runtime:.6f} seconds")
+        return [], runtime
 
-    print(f"Top {len(results)} for {qtype} BM25 query: {query!r} (raw BM25 scores)")
-
-    # 1) gather ids
-    docids = [docid for docid, _ in results]
-
+    # Fetch content if requested (not included in runtime)
     content_by_id = {}
-    if show_content and docids:
-        # 2) single batched fetch
+    if show_content:
+        docids = [docid for docid, _ in results]
         placeholders = ",".join(["?"] * len(docids))
         rows = con.execute(
             f"SELECT docid, content FROM my_ducklake.data WHERE docid IN ({placeholders})",
             docids,
         ).fetchall()
-        # 3) map
         content_by_id = {docid: content for docid, content in rows}
 
-    # 4) print with O(1) lookups
+    # Display results
+    print(f"Top {len(results)} for {qtype} BM25 query: {query!r} (raw BM25 scores)")
+    print(f"BM25 SQL runtime: {runtime:.6f} seconds")
+
     for rank, (docid, score) in enumerate(results, 1):
         line = f"{rank:2d}. docid={docid}  score={score:.6f}"
         if show_content:
@@ -234,3 +235,5 @@ def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"
                 snippet = str(content)[:160].replace("\n", " ")
                 line += f"  |  {snippet!r}"
         print(line)
+
+    return results, runtime

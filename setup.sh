@@ -46,7 +46,7 @@ conda create -y -n "$ENV_NAME" python
 # --- Install required packages from conda-forge ---
 echo "Installing dependencies..."
 conda run -n "$ENV_NAME" conda install -y -c conda-forge \
-  "duckdb>=1.4.1" numpy pyarrow
+  "duckdb>=1.4.1" numpy pyarrow matplotlib
 
 # --- Verify installation and version requirements ---
 echo "Verifying package installation..."

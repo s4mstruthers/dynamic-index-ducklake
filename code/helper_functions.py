@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-import os
 
 # ---------------------------------------------------------------------
 # Project Path Constants
@@ -72,6 +71,13 @@ def get_termid(con, term):
         [term],
     ).fetchone()
     return row[0] if row else None
+
+def get_docid_count(con):
+    """
+    Retrieve the number of docid's which are stored in the index.
+    """
+    result = con.execute("SELECT COUNT(*) FROM my_ducklake.docs").fetchone()
+    return result[0] if result else 0
 
 # ---------------------------------------------------------------------
 # Tokenization Utilities

@@ -47,10 +47,16 @@ def run_query(query, top_n=10, show_content=False, qtype="disjunctive"):
       - top_n: max results to show
       - show_content: append content snippet to each result
       - qtype: 'conjunctive' (AND) or 'disjunctive' (OR)
+
+    Returns:
+      (results, runtime_seconds) where runtime is BM25 SQL only.
     """
     con = duckdb.connect()
     connect_ducklake(con)
-    run_bm25_query(con, query, top_n=top_n, show_content=show_content, qtype=qtype)
+    results, runtime = run_bm25_query(
+        con, query, top_n=top_n, show_content=show_content, qtype=qtype
+    )
+    return results, runtime
 
 
 def run_import(parquet):
@@ -188,7 +194,9 @@ if __name__ == "__main__":
     elif args.mode == "query":
         if not args.query:
             raise SystemExit("ERROR: provide --q 'your query'")
-        run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype)
+        results, runtime = run_query(args.query, top_n=args.top_n, show_content=args.show_content, qtype=args.qtype)
+        # Extra machine-readable line for scripting; BM25 SQL only.
+        print(f"BM25_SQL_RUNTIME_SECONDS={runtime:.6f}")
     elif args.mode == "import":
         run_import(args.parquet)
     elif args.mode == "initialise":
