@@ -16,7 +16,7 @@ import duckdb
 import matplotlib.pyplot as plt  # for plotting
 
 from helper_functions import connect_ducklake, get_docid_count
-from index_tools import reindex, delete_N
+from index_tools import reindex, delete_N, delete_N_rand
 from fts_tools import run_bm25_query
 
 
@@ -78,7 +78,7 @@ def average_bm25_sql_time(con, queries, top_n=10, qtype="disjunctive"):
     return avg, runtimes
 
 
-def plot_results_csv(results_csv, qtype, top_n, output_png=None, show=False):
+def plot_results_csv(results_csv, qtype, top_n, output_png=None, random=False,show=False):
     """
     Plot Average BM25 SQL runtime vs % of index deleted from the results CSV.
     - X: % deleted (100 - percent_of_original)
@@ -87,8 +87,8 @@ def plot_results_csv(results_csv, qtype, top_n, output_png=None, show=False):
     """
     x_pct_deleted = []
     y_avg_runtime = []
-
     col_name = f"avg_bm25_sql_time_s_{qtype}_top{top_n}"
+
     with open(results_csv, newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
         for row in r:
@@ -110,7 +110,12 @@ def plot_results_csv(results_csv, qtype, top_n, output_png=None, show=False):
     plt.plot(x_pct_deleted, y_avg_runtime, marker="o")
     plt.xlabel("% of index deleted")
     plt.ylabel(f"Avg BM25 SQL time (s) [{qtype}, top={top_n}]")
-    plt.title("Average query time vs % of index deleted")
+    
+    if random:
+        plt.title("Average query time vs % of index randomly deleted")
+    else:
+        plt.title("Average query time vs % of index sequentially deleted")
+
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(output_png, dpi=150)
@@ -134,6 +139,7 @@ def main():
                     help="Output CSV to save the generated queries; default queries_random_<timestamp>.csv")
     ap.add_argument("--plot", action="store_true", help="Generate a plot PNG at the end.")
     ap.add_argument("--plot-file", type=str, default=None, help="Custom plot output PNG path.")
+    ap.add_argument("--random",type=bool,default=False, help="Randomise order of docids before deleting")
     args = ap.parse_args()
 
     # connect & reindex from current my_ducklake.data
@@ -188,8 +194,10 @@ def main():
                 len(queries),
                 args.delete_batch,
             ])
-
-        delete_N(con, args.delete_batch)
+        if args.random:
+            delete_N_rand(con, args.delete_batch)
+        else:
+            delete_N(con,args.delete_batch)
         docs_remaining = get_docid_count(con)
 
     # Plot if requested

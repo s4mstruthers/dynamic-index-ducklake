@@ -342,10 +342,87 @@ def delete(con, docid):
         con.execute("ROLLBACK")
         raise
 
-
 def delete_N(con, N):
     """
-    Delete N random docs in one transaction and repair index structures in bulk.
+    Delete N docs in one transaction and repair index structures in bulk.
+    Strategy:
+      - Choose top N docids into a TEMP table.
+      - Derive touched termids and how many of the N docs they appear in.
+      - Decrement df by those counts (clamped at 0).
+      - Remove postings/docs/data rows in bulk.
+      - Drop temp state and commit atomically.
+    """
+    con.execute("BEGIN")
+    try:
+        # Fresh temp tables
+        con.execute("DROP TABLE IF EXISTS del_docids")
+        con.execute("DROP TABLE IF EXISTS touched_termids")
+
+        # Choose N random docids from docs
+        con.execute("CREATE TEMP TABLE del_docids(docid BIGINT)")
+        con.execute(
+            "INSERT INTO del_docids "
+            "SELECT docid FROM my_ducklake.docs LIMIT ?",
+            [N],
+        )
+
+        # Compute touched termids with multiplicity (tf across all docs to be deleted) across the N docs
+        con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT, cnt BIGINT)")
+        con.execute(
+            """
+            INSERT INTO touched_termids
+            SELECT termid, COUNT(DISTINCT docid) AS cnt
+            FROM my_ducklake.postings
+            WHERE docid IN (SELECT docid FROM del_docids)
+            GROUP BY termid
+            """
+        )
+
+        # Decrement df for only touched termids (clamp at 0)
+        con.execute(
+            """
+            UPDATE my_ducklake.dict AS d
+            SET df = CASE
+                        WHEN d.df > t.cnt THEN d.df - t.cnt
+                        ELSE 0
+                     END
+            FROM touched_termids t
+            WHERE d.termid = t.termid
+            """
+        )
+
+        # Remove terms whose df reached 0 and hence dont need to be stored anymore from only those we touched
+        con.execute(
+            """
+            DELETE FROM my_ducklake.dict
+            WHERE df = 0
+              AND termid IN (SELECT termid FROM touched_termids)
+            """
+        )
+
+        # Bulk delete postings/docs/data for the selected docids
+        con.execute(
+            "DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)"
+        )
+        con.execute(
+            "DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)"
+        )
+        con.execute(
+            "DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)"
+        )
+
+        # 6) Cleanup temp tables
+        con.execute("DROP TABLE IF EXISTS touched_termids")
+        con.execute("DROP TABLE IF EXISTS del_docids")
+
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+def delete_N_rand(con, N):
+    """
+    Delete N *random* docs in one transaction and repair index structures in bulk.
     Strategy:
       - Choose N random docids into a TEMP table.
       - Derive touched termids and how many of the N docs they appear in.
@@ -420,7 +497,6 @@ def delete_N(con, N):
     except Exception:
         con.execute("ROLLBACK")
         raise
-
 
 def insert(con, doc, docid=None):
     """
