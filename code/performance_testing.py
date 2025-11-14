@@ -152,6 +152,9 @@ def main():
     # Minimal console noise per your request
     reindex(con)
 
+    #Setting the default rewrite delete threshold
+    con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
+
     original_count = get_docid_count(con)
     if original_count == 0:
         raise SystemExit("ERROR: Index has 0 documents after reindex. Populate my_ducklake.data first.")
