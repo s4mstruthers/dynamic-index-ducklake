@@ -17,7 +17,7 @@ TEST_FOLDER = BASE_DIR.parent / "test"
 PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 
 # ---------------------------------------------------------------------
-# DuckLake Catalog Attachment
+# DuckLake Attachment
 # ---------------------------------------------------------------------
 def connect_ducklake(con):
     """
@@ -277,3 +277,25 @@ def cleanup_orphaned_files(con, older_than_days=7, dry_run=True, all_files=False
             f"CALL ducklake_delete_orphaned_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
         )
         print(f"Deleted orphaned files older than {interval}.")
+
+def checkpoint(con):
+    """
+    Implements all the ducklake maintenance functions bundled
+    """
+    con.execute("CHECKPOINT;")
+
+def rewrite_data_files(con, delete_threshold=None):
+    """
+    Only rewrites data files that have deletions, skipping other checkpoint operations.
+    
+    Parameters:
+      - delete_threshold (float): Optional. A ratio (0.0 to 1.0) specifying the 
+        minimum percentage of rows that must be deleted in a file for it to be 
+        rewritten. If None, uses the system default.
+    """
+    if delete_threshold is not None:
+        # Use a specific threshold if provided (e.g., 0.1 for 10% deleted)
+        con.execute(f"CALL ducklake_rewrite_data_files('my_ducklake', delete_threshold => {delete_threshold});")
+    else:
+        # Run with default settings
+        con.execute("CALL ducklake_rewrite_data_files('my_ducklake');")

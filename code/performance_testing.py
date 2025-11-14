@@ -10,12 +10,13 @@ import os
 from datetime import datetime
 import io
 import sys
+import time
 from contextlib import redirect_stdout
 
 import duckdb
-import matplotlib.pyplot as plt  # for plotting
+import matplotlib.pyplot as plt
 
-from helper_functions import connect_ducklake, get_docid_count
+from helper_functions import connect_ducklake, get_docid_count, checkpoint
 from index_tools import reindex, delete_N, delete_N_rand
 from fts_tools import run_bm25_query
 
@@ -78,7 +79,7 @@ def average_bm25_sql_time(con, queries, top_n=10, qtype="disjunctive"):
     return avg, runtimes
 
 
-def plot_results_csv(results_csv, qtype, top_n, output_png=None, random=False,show=False):
+def plot_results_csv(results_csv, qtype, top_n, output_png=None, random=False, show=False):
     """
     Plot Average BM25 SQL runtime vs % of index deleted from the results CSV.
     - X: % deleted (100 - percent_of_original)
@@ -140,6 +141,9 @@ def main():
     ap.add_argument("--plot", action="store_true", help="Generate a plot PNG at the end.")
     ap.add_argument("--plot-file", type=str, default=None, help="Custom plot output PNG path.")
     ap.add_argument("--random",type=bool,default=False, help="Randomise order of docids before deleting")
+    ap.add_argument("--checkpoint-pct", type=float, default=0.0,
+                    help="Run CHECKPOINT every N percent deleted. 0.0 to disable (default: 0.0)")
+    
     args = ap.parse_args()
 
     # connect & reindex from current my_ducklake.data
@@ -174,6 +178,9 @@ def main():
 
     iteration = 0
     docs_remaining = original_count
+    
+    # --- State tracker for checkpointing ---
+    next_checkpoint_pct = args.checkpoint_pct
 
     # Only show iteration status (% deleted) in terminal
     while docs_remaining >= args.delete_batch:
@@ -198,11 +205,28 @@ def main():
             delete_N_rand(con, args.delete_batch)
         else:
             delete_N(con,args.delete_batch)
+            
+        # --- Checkpoint logic ---
+        # Check if we have a valid checkpoint interval and have crossed the next threshold
+        if args.checkpoint_pct > 0 and pct_deleted >= next_checkpoint_pct:
+            print(f"--- CHECKPOINT triggered at {pct_deleted:.2f}% deleted (>= {next_checkpoint_pct}%) ---")
+            start_ckpt = time.perf_counter()
+            
+            # Call the checkpoint function from helper_functions
+            checkpoint(con) 
+            
+            end_ckpt = time.perf_counter()
+            print(f"--- CHECKPOINT complete ({end_ckpt - start_ckpt:.4f}s) ---")
+            
+            # Set the next checkpoint target
+            next_checkpoint_pct += args.checkpoint_pct
+        
+        # Update doc count after delete and potential checkpoint
         docs_remaining = get_docid_count(con)
 
     # Plot if requested
     if args.plot:
-        png = plot_results_csv(results_csv, args.qtype, args.top, output_png=args.plot_file, show=False)
+        png = plot_results_csv(results_csv, args.qtype, args.top, output_png=args.plot_file, random = args.random, show=False)
         if png:
             print(f"PLOT {png}")
 
