@@ -152,8 +152,7 @@ def main():
     # Minimal console noise per your request
     reindex(con)
 
-    #Setting the default rewrite delete threshold
-    con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
+    
 
     original_count = get_docid_count(con)
     if original_count == 0:
@@ -211,7 +210,11 @@ def main():
             
         # --- Checkpoint logic ---
         # Check if we have a valid checkpoint interval and have crossed the next threshold
+        # This logic will skip entirely when checkpoint is set to 0
         if args.checkpoint_pct > 0 and pct_deleted >= next_checkpoint_pct:
+            #Setting the default rewrite delete threshold
+            con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
+
             print(f"--- CHECKPOINT triggered at {pct_deleted:.2f}% deleted (>= {next_checkpoint_pct}%) ---")
             start_ckpt = time.perf_counter()
             

@@ -20,7 +20,7 @@ from fts_tools import run_bm25_query
 # Index operations
 from index_tools import reindex, delete
 # Testing
-from test import run_tests  # type: ignore
+from test_logic import run_tests  # type: ignore
 
 
 # ---------------------------------------------------------------------
