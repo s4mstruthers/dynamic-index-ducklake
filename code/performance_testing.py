@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # performance_testing.py
-# Reindex from current my_ducklake.data, generate random queries (1–3 terms),
+# Reindex from current my_ducklake.data, generate (or reuse) random queries,
 # measure avg BM25 SQL time (BM25-SQL-only), delete in batches, log metrics,
 # and plot average runtime vs % of index deleted.
 
 import argparse
 import csv
 import os
+import glob
 from datetime import datetime
 import io
 import sys
@@ -19,6 +20,40 @@ import matplotlib.pyplot as plt
 from helper_functions import connect_ducklake, get_docid_count, checkpoint
 from index_tools import reindex, delete_N, delete_N_rand
 from fts_tools import run_bm25_query
+
+
+def get_latest_query_file(pattern="queries_random_*.csv"):
+    """Finds the most recently created queries file matching the pattern."""
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    # Sort by creation time (latest last)
+    return max(files, key=os.path.getctime)
+
+
+def load_queries_from_csv(filepath):
+    """Reads a single-column CSV of queries into a list."""
+    queries = []
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Query file not found: {filepath}")
+        
+    with open(filepath, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        # Simple check to skip header if it exists and looks like "query"
+        if header and header[0] == "query":
+            pass 
+        elif header:
+            # If first row isn't "query", treat it as data? 
+            # For safety based on this script's generation, we assume header exists.
+            # If users manually made a file without header, this line might skip the first query.
+            # Adjusted to just append if it doesn't look like the standard header.
+            queries.append(header[0])
+
+        for row in reader:
+            if row:
+                queries.append(row[0])
+    return queries
 
 
 def generate_random_queries(con, k=100, min_terms=1, max_terms=3, out_csv=None):
@@ -138,9 +173,15 @@ def main():
                     help="Results CSV path; default performance_results_<timestamp>.csv")
     ap.add_argument("--queries-csv", type=str, default=None,
                     help="Output CSV to save the generated queries; default queries_random_<timestamp>.csv")
+    
+    # --- REUSE QUERY OPTIONS ---
+    ap.add_argument("--reuse-file", type=str, help="Specify a CSV file to reuse queries from (skips generation).")
+    ap.add_argument("--reuse-latest", action="store_true", help="Automatically reuse the latest queries_random_*.csv.")
+    # ------------------------------
+
     ap.add_argument("--plot", action="store_true", help="Generate a plot PNG at the end.")
     ap.add_argument("--plot-file", type=str, default=None, help="Custom plot output PNG path.")
-    ap.add_argument("--random",type=bool,default=False, help="Randomise order of docids before deleting")
+    ap.add_argument("--random", type=bool, default=False, help="Randomise order of docids before deleting")
     ap.add_argument("--checkpoint-pct", type=float, default=0.0,
                     help="Run CHECKPOINT every N percent deleted. 0.0 to disable (default: 0.0)")
     
@@ -152,18 +193,48 @@ def main():
     # Minimal console noise per your request
     reindex(con)
 
-    
-
     original_count = get_docid_count(con)
     if original_count == 0:
         raise SystemExit("ERROR: Index has 0 documents after reindex. Populate my_ducklake.data first.")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_csv = args.results_csv or f"performance_results_{ts}.csv"
-    queries_csv = args.queries_csv or f"queries_random_{ts}.csv"
+    
+    # --- QUERY GENERATION OR REUSE LOGIC ---
+    queries = []
+    queries_csv_used = ""
 
-    # always generate fresh random query set (1–3 terms) and save to CSV
-    queries = generate_random_queries(con, k=args.query_count, min_terms=1, max_terms=3, out_csv=queries_csv)
+    if args.reuse_latest or args.reuse_file:
+        # Reuse logic
+        target_file = args.reuse_file
+        if args.reuse_latest:
+            latest = get_latest_query_file()
+            if latest:
+                target_file = latest
+            else:
+                raise SystemExit("ERROR: --reuse-latest specified but no 'queries_random_*.csv' files found.")
+        
+        if not target_file:
+            raise SystemExit("ERROR: --reuse-file specified but no filename provided.")
+            
+        print(f"--- REUSING QUERIES FROM: {target_file} ---")
+        queries = load_queries_from_csv(target_file)
+        queries_csv_used = target_file
+        
+        if not queries:
+             raise SystemExit(f"ERROR: No queries found in {target_file}")
+    else:
+        # Generation logic
+        queries_csv_used = args.queries_csv or f"queries_random_{ts}.csv"
+        print(f"--- GENERATING {args.query_count} NEW QUERIES ---")
+        queries = generate_random_queries(
+            con, 
+            k=args.query_count, 
+            min_terms=1, 
+            max_terms=3, 
+            out_csv=queries_csv_used
+        )
+    # ---------------------------------------
 
     # results header
     os.makedirs(os.path.dirname(results_csv) or ".", exist_ok=True)
@@ -206,13 +277,11 @@ def main():
         if args.random:
             delete_N_rand(con, args.delete_batch)
         else:
-            delete_N(con,args.delete_batch)
+            delete_N(con, args.delete_batch)
             
         # --- Checkpoint logic ---
-        # Check if we have a valid checkpoint interval and have crossed the next threshold
-        # This logic will skip entirely when checkpoint is set to 0
         if args.checkpoint_pct > 0 and pct_deleted >= next_checkpoint_pct:
-            #Setting the default rewrite delete threshold
+            # Setting the default rewrite delete threshold
             con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
 
             print(f"--- CHECKPOINT triggered at {pct_deleted:.2f}% deleted (>= {next_checkpoint_pct}%) ---")
@@ -232,13 +301,13 @@ def main():
 
     # Plot if requested
     if args.plot:
-        png = plot_results_csv(results_csv, args.qtype, args.top, output_png=args.plot_file, random = args.random, show=False)
+        png = plot_results_csv(results_csv, args.qtype, args.top, output_png=args.plot_file, random=args.random, show=False)
         if png:
             print(f"PLOT {png}")
 
     # Final minimal summary
     print(f"RESULTS {results_csv}")
-    print(f"QUERIES {queries_csv}")
+    print(f"QUERIES {queries_csv_used}")
 
 
 if __name__ == "__main__":

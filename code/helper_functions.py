@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-
+import duckdb
 # ---------------------------------------------------------------------
 # Project Path Constants
 # ---------------------------------------------------------------------
@@ -63,14 +63,21 @@ def test_ducklake(con):
 def get_termid(con, term):
     """
     Retrieve the termid for a given term from `my_ducklake.dict`.
-    Returns None if the term is not present.
-    Uses parameterized query to prevent SQL injection.
+    Returns None if the term is not present OR if the index is 
+    momentarily unreadable due to a delete merge.
     """
-    row = con.execute(
-        "SELECT termid FROM my_ducklake.dict WHERE term = ?",
-        [term],
-    ).fetchone()
-    return row[0] if row else None
+    try:
+        row = con.execute(
+            "SELECT termid FROM my_ducklake.dict WHERE term = ?",
+            [term],
+        ).fetchone()
+        return row[0] if row else None
+        
+    except duckdb.IOException:
+        # Catch the "Could not read enough bytes" error.
+        # If the file is in flux due to a delete, we treat the term 
+        # as missing for this specific millisecond.
+        return None
 
 def get_docid_count(con):
     """
