@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import time
 import duckdb
 # ---------------------------------------------------------------------
 # Project Path Constants
@@ -215,94 +216,16 @@ def import_data(con, parquet):
 # ---------------------------------------------------------------------
 # DuckLake Maintenance / Cleanup
 # ---------------------------------------------------------------------
-def cleanup_old_files(con, older_than_days=7, dry_run=True, all_files=False):
-    """
-    Remove files that DuckLake scheduled for deletion (expired snapshots).
 
-    Parameters:
-      - older_than_days: Age threshold for cleanup.
-      - dry_run: Only list files to be deleted (no changes).
-      - all_files: Ignore the threshold and clean all eligible files.
-    """
-    try:
-        days = int(older_than_days)
-        if days <= 0:
-            raise ValueError
-    except Exception:
-        raise SystemExit("ERROR: older_than_days must be a positive integer.")
-
-    interval = f"{days} days"
-    con.execute("USE my_ducklake")
-
-    if all_files:
-        con.execute("CALL ducklake_cleanup_old_files('my_ducklake', cleanup_all => true)")
-        print("Executed cleanup of all scheduled-for-deletion files.")
-        return
-
-    if dry_run:
-        con.execute(
-            f"CALL ducklake_cleanup_old_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
-        )
-        print(f"Dry run: listed scheduled deletions older than {interval}.")
-    else:
-        con.execute(
-            f"CALL ducklake_cleanup_old_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
-        )
-        print(f"Deleted scheduled files older than {interval}.")
-
-def cleanup_orphaned_files(con, older_than_days=7, dry_run=True, all_files=False):
-    """
-    Remove orphaned (untracked) data files from the DuckLake DATA_PATH.
-
-    Parameters mirror cleanup_old_files:
-      - older_than_days: Age threshold for cleanup.
-      - dry_run: Only list files to be deleted.
-      - all_files: Delete all orphans regardless of age.
-    """
-    try:
-        days = int(older_than_days)
-        if days <= 0:
-            raise ValueError
-    except Exception:
-        raise SystemExit("ERROR: older_than_days must be a positive integer.")
-
-    interval = f"{days} days"
-    con.execute("USE my_ducklake")
-
-    if all_files:
-        con.execute("CALL ducklake_delete_orphaned_files('my_ducklake', cleanup_all => true)")
-        print("Executed cleanup of all orphaned files.")
-        return
-
-    if dry_run:
-        con.execute(
-            f"CALL ducklake_delete_orphaned_files('my_ducklake', dry_run => true, older_than => now() - INTERVAL '{interval}')"
-        )
-        print(f"Dry run: listed orphaned files older than {interval}.")
-    else:
-        con.execute(
-            f"CALL ducklake_delete_orphaned_files('my_ducklake', older_than => now() - INTERVAL '{interval}')"
-        )
-        print(f"Deleted orphaned files older than {interval}.")
-
-def checkpoint(con):
+def checkpoint_rewrite(con):
     """
     Implements all the ducklake maintenance functions bundled
     """
-    con.execute("CHECKPOINT;")
-
-def rewrite_data_files(con, delete_threshold=None):
-    """
-    Only rewrites data files that have deletions, skipping other checkpoint operations.
-    
-    Parameters:
-      - delete_threshold (float): Optional. A ratio (0.0 to 1.0) specifying the 
-        minimum percentage of rows that must be deleted in a file for it to be 
-        rewritten. If None, uses the system default.
-    """
-    if delete_threshold is not None:
-        # Use a specific threshold if provided (e.g., 0.1 for 10% deleted)
-        con.execute(f"CALL ducklake_rewrite_data_files('my_ducklake', delete_threshold => {delete_threshold});")
-    else:
-        # Run with default settings
-        con.execute("CALL ducklake_rewrite_data_files('my_ducklake');")
+    print(f"--- CHECKPOINT triggered ---")
+    start_ckpt = time.perf_counter()
+    con.execute("""
+                CALL ducklake_rewrite_data_files('my_ducklake', delete_threshold => 0.01);
+                CHECKPOINT;
+                """)
+    end_ckpt = time.perf_counter()
+    print(f"--- CHECKPOINT complete ({end_ckpt - start_ckpt:.4f}s) ---")

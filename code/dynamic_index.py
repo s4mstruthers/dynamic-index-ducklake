@@ -12,23 +12,19 @@ from helper_functions import (
     test_ducklake,
     initialise_data,
     import_data,
-    cleanup_old_files,
-    cleanup_orphaned_files,
 )
 from fts_tools import run_bm25_query
 
 # Index operations
 from index_tools import reindex, delete
 # Testing
-from test_logic import run_tests  # type: ignore
+#from test_logic import run_tests  # type: ignore
 
 
 # ---------------------------------------------------------------------
 # Mode runners
 # ---------------------------------------------------------------------
-def run_test():
-    """Execute internal test suite (functional smoke tests)."""
-    run_tests()
+
 
 
 def run_sanity():
@@ -95,31 +91,6 @@ def run_reindex():
     reindex(con)
     print("Reindexed from current my_ducklake.main.data.")
 
-
-def run_cleanup(older_than_days=7, dry_run=True, all_files=False):
-    """
-    Remove files scheduled for deletion by DuckLake retention.
-
-    - older_than_days: threshold for eligible files
-    - dry_run: list-only
-    - all_files: ignore threshold and clean everything eligible
-    """
-    con = duckdb.connect()
-    connect_ducklake(con)
-    cleanup_old_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
-
-
-def run_cleanup_orphans(older_than_days=7, dry_run=True, all_files=False):
-    """
-    Remove orphaned (untracked) files from the DuckLake DATA_PATH.
-
-    Parameters mirror run_cleanup.
-    """
-    con = duckdb.connect()
-    connect_ducklake(con)
-    cleanup_orphaned_files(con, older_than_days=older_than_days, dry_run=dry_run, all_files=all_files)
-
-
 def run_delete(docid):
     """
     Delete one document and cascade updates to index structures.
@@ -141,14 +112,11 @@ if __name__ == "__main__":
     ap.add_argument(
         "--mode",
         choices=[
-            "test",
             "sanity",
             "query",
             "import",
             "initialise",
             "reindex",
-            "cleanup",
-            "cleanup-orphans",
             "delete",
         ],
         default="query",
@@ -187,9 +155,8 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
 
-    if args.mode == "test":
-        run_test()
-    elif args.mode == "sanity":
+
+    if args.mode == "sanity":
         run_sanity()
     elif args.mode == "query":
         if not args.query:
@@ -203,10 +170,6 @@ if __name__ == "__main__":
         run_initialise(args.parquet, args.limit)
     elif args.mode == "reindex":
         run_reindex()
-    elif args.mode == "cleanup":
-        run_cleanup(older_than_days=args.older_than, dry_run=args.dry_run, all_files=args.cleanup_all)
-    elif args.mode == "cleanup-orphans":
-        run_cleanup_orphans(older_than_days=args.older_than, dry_run=args.dry_run, all_files=args.cleanup_all)
     elif args.mode == "delete":
         if args.docid is None:
             raise SystemExit("ERROR: provide --docid <int> for --mode delete")

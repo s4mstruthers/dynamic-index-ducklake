@@ -17,7 +17,7 @@ from contextlib import redirect_stdout
 import duckdb
 import matplotlib.pyplot as plt
 
-from helper_functions import connect_ducklake, get_docid_count, checkpoint
+from helper_functions import connect_ducklake, get_docid_count, checkpoint_rewrite
 from index_tools import reindex, delete_N, delete_N_rand
 from fts_tools import run_bm25_query
 
@@ -282,16 +282,10 @@ def main():
         # --- Checkpoint logic ---
         if args.checkpoint_pct > 0 and pct_deleted >= next_checkpoint_pct:
             # Setting the default rewrite delete threshold
-            con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
-
-            print(f"--- CHECKPOINT triggered at {pct_deleted:.2f}% deleted (>= {next_checkpoint_pct}%) ---")
-            start_ckpt = time.perf_counter()
+            #con.execute("CALL my_ducklake.set_option('rewrite_delete_threshold', 0.01);")
             
             # Call the checkpoint function from helper_functions
-            checkpoint(con) 
-            
-            end_ckpt = time.perf_counter()
-            print(f"--- CHECKPOINT complete ({end_ckpt - start_ckpt:.4f}s) ---")
+            checkpoint_rewrite(con) 
             
             # Set the next checkpoint target
             next_checkpoint_pct += args.checkpoint_pct
