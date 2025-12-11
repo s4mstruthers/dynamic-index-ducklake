@@ -1,6 +1,6 @@
 # DuckLake Dynamic Indexing System
 
-An ACID-compliant dynamic indexing and search system built on top of **DuckDB** and **DuckLake**. This project implements a BM25 Full-Text Search (FTS) engine that supports real-time updates (inserts/deletes) and persistent storage using Parquet artifacts managed by a custom metadata catalog.
+An ACID-compliant dynamic indexing and search system built on top of **DuckDB** and **DuckLake**. This project implements a BM25 Full-Text Search (FTS) engine that supports real-time updates (inserts/deletes) and persistent storage using Parquet artifacts managed by DuckLake's metadata catalog.
 
 ## 🚀 Features
 
