@@ -6,7 +6,7 @@ A high-performance, ACID-compliant dynamic indexing and search system built on t
 
 * **Dynamic Indexing**: Supports point-deletes, batch deletions, and upserts without requiring full index rebuilds.
 * **BM25 Search**: Full SQL-based implementation of Okapi BM25 with support for both Conjunctive (AND) and Disjunctive (OR) query semantics.
-* **DuckLake Integration**: Utilizes the `ducklake` extension for metadata management, atomic data rewrites, and maintenance[cite: 1].
+* **DuckLake Integration**: Utilizes the `ducklake` extension for metadata management, atomic data rewrites, and maintenance.
 * **Performance Benchmarking**: Built-in tooling to measure query latency degradation over time as the index accumulates deletions ("tombstones").
 * **Visual Analytics**: Automated generation of performance plots comparing raw query times and improvements across different maintenance strategies.
 
@@ -21,15 +21,15 @@ A high-performance, ACID-compliant dynamic indexing and search system built on t
 │   ├── dynamic\_index.py      \# Main CLI entry point for all operations
 │   ├── fts\_tools.py          \# BM25 scoring logic (Conjunctive/Disjunctive)
 │   ├── index\_tools.py        \# Logic for building/repairing Parquet index artifacts
-[cite_start]│   ├── helper\_functions.py   \# Database connection and path management [cite: 1]
+│   ├── helper\_functions.py   \# Database connection and path management
 │   └── setup.sh              \# Environment setup script
 ├── ducklake/                 \# Managed storage area
-│   ├── data\_files/           \# Physical data storage
+│   ├── data\_files/           \# Physical data storage (managed by DuckLake)
 │   └── metadata\_catalog.ducklake
 ├── parquet/
-[cite_start]│   ├── webcrawl\_data/        \# Raw source documents (input) [cite: 1]
+│   ├── webcrawl\_data/        \# Raw source documents (active input)
 │   ├── index/                \# Generated index artifacts (dict, docs, postings)
-│   └── backup\_parquets/      \# Clean state backups for resets
+│   └── backup\_parquets/      \# Clean state backups (REQUIRED for 'reset' command)
 └── results/
 ├── performance\_results/  \# CSV logs from benchmark runs
 ├── performance\_plots/    \# Generated visualizations
@@ -46,7 +46,7 @@ A high-performance, ACID-compliant dynamic indexing and search system built on t
 * **Linux/macOS** (Script uses bash)
 
 ### 1. Initialize Environment
-Use the provided setup script to create the `dynamic-index-ducklake` Conda environment and install dependencies (`duckdb>=1.4.1`, `numpy`, `pyarrow`, `matplotlib`).
+Use the provided setup script to create the `dynamic-index-ducklake` Conda environment, install dependencies (`duckdb>=1.4.1`, `numpy`, `pyarrow`, `matplotlib`), and generate the required directory structure.
 
 ```bash
 bash code/setup.sh
@@ -69,19 +69,19 @@ All operations are handled via the `dynamic_index.py` CLI tool. Ensure you are i
 Load raw Parquet data into the system and build the initial inverted index.
 
 ```bash
-# Initialize with all data in parquet/webcrawl_data
+# Initialize with all data found in parquet/webcrawl_data/
 python code/dynamic_index.py initialise --parquet ALL
 
-# Initialize with a specific limit
+# Initialize with a specific limit (e.g., first 1000 docs)
 python code/dynamic_index.py initialise --limit 1000
 ```
 
 ### Running Search Queries
 
-Execute BM25 queries against the index.
+Execute BM25 queries against the index using SQL-based scoring.
 
 ```bash
-# Run a disjunctive (OR) query
+# Run a disjunctive (OR) query (default)
 python code/dynamic_index.py query --q "artificial intelligence" --top 10
 
 # Run a conjunctive (AND) query and show document content
@@ -98,6 +98,14 @@ python code/dynamic_index.py delete --docid 42
 
 # Manually trigger a checkpoint/rewrite to clean up deleted rows
 python code/dynamic_index.py checkpoint
+```
+
+### System Reset
+
+Perform a "Hard Reset" to wipe the database and restore fresh data from `parquet/backup_parquets/`.
+
+```bash
+python code/dynamic_index.py reset
 ```
 
 -----
@@ -123,10 +131,11 @@ python code/dynamic_index.py perf-test \
   * `--random`: Deletes documents in random order (vs. sequential).
   * `--checkpoint-pct`: Triggers a DuckLake checkpoint every N% of data deleted.
   * `--reset`: Wipes the database and restores from backup before starting.
+  * `--plot`: Automatically generates a plot at the end of the run.
 
 ### Compare Results
 
-Generate comparison plots from multiple test run CSVs.
+Generate comparison plots from multiple test run CSVs (e.g., to compare performance with and without checkpoints).
 
 ```bash
 python code/dynamic_index.py plot-comparison \
@@ -140,4 +149,4 @@ python code/dynamic_index.py plot-comparison \
 
 1.  **Index Construction**: The index consists of three tables: `dict` (term dictionary), `docs` (document lengths), and `postings` (inverted list). These are initially built as Parquet artifacts.
 2.  **Scoring**: Scoring is performed entirely within DuckDB using complex SQL queries that implement the BM25 probabilistic model.
-3.  **Persistence**: The `ducklake` extension is used to attach the catalog. [cite_start]Data is stored in `ducklake/data_files`[cite: 1].
+3.  **Persistence**: The `ducklake` extension is used to attach the catalog. Data is stored in `ducklake/data_files`.
