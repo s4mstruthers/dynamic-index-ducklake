@@ -10,5 +10,6 @@ parquet/
 # macOS
 .DS_Store
 
-code/*.csv
-code/*.png
+results/performance_plots/*.png
+results/performance_results/*.csv
+results/query_terms/*.csv
