@@ -11,9 +11,9 @@ from helper_functions import PARQUET_FOLDER, tokenize
 # ---------------------------------------------------------------------
 # Tuning knobs (scale/perf)
 # ---------------------------------------------------------------------
-BATCH_SIZE = 50_000              # rows fetched per round-trip from DuckDB
-DOCS_FLUSH_ROWS = 500_000        # docs rows per Parquet row group
-POSTINGS_FLUSH_ROWS = 2_000_000  # postings rows per Parquet row group
+BATCH_SIZE = 50_000              # rows fetched per round-trip from DuckDB (unused in SQL mode)
+DOCS_FLUSH_ROWS = 500_000        # docs rows per Parquet row group (unused in SQL mode)
+POSTINGS_FLUSH_ROWS = 2_000_000  # postings rows per Parquet row group (unused in SQL mode)
 PARQUET_COMPRESSION = "zstd"     # compression algo for all Parquet outputs
 DETERMINISTIC_TERMIDS = False    # True => tid by lexicographic term (slower)
 
@@ -32,196 +32,69 @@ def _ensure_dirs():
     """Ensure Parquet output directory exists before writing artifacts."""
     PARQ_DIR.mkdir(parents=True, exist_ok=True)
 
-def _iter_data(con):
-    """
-    Stream (docid, content) from my_ducklake.main.data.
-
-    Uses fetchmany(BATCH_SIZE) to balance latency and memory; yields tuples.
-    """
-    con.execute("USE my_ducklake")
-    con.execute("SELECT docid, content FROM main.data")
-    fetch = con.fetchmany
-    while True:
-        batch = fetch(BATCH_SIZE)
-        if not batch:
-            break
-        for docid, content in batch:
-            yield docid, content
-
 # ---------------------------------------------------------------------
 # Public: full rebuild
 # ---------------------------------------------------------------------
 def build_index_to_parquet_from_ducklake(con):
     """
-    Build index Parquets from my_ducklake.main.data in a streaming fashion.
-
-    Outputs:
-      - docs.parquet: (docid, len)
-      - postings.parquet: (termid, docid, tf)
-      - dict.parquet: (termid, term, df) built from in-memory term map + df
-
-    Memory profile: O(#distinct terms) + O(buffer sizes); NOT O(#postings).
+    Build index Parquets from my_ducklake.main.data using vectorized SQL.
     """
     _ensure_dirs()
 
-    # Clean previous artifacts to guarantee a single file per table
-    for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
+    # 1. Create a transient view of all tokens (matching Python's regex [a-z]+)
+    # We use regexp_extract_all to get a list, then UNNEST to explode it into rows.
+    con.execute("USE my_ducklake")
+    con.execute("""
+        CREATE OR REPLACE TEMP VIEW v_token_stream AS 
+        SELECT 
+            docid, 
+            UNNEST(regexp_extract_all(lower(content), '[a-z]+')) AS term
+        FROM my_ducklake.data
+    """)
 
-    # Dictionary and DF counts
-    term_to_id = {}               # term -> termid
-    df_counter = defaultdict(int) # termid -> df
-    next_tid = 1
+    # 2. Build and Write Dictionary (dict.parquet)
+    # Uses row_number() for deterministic IDs (sorted by term)
+    print(f"Building dictionary -> {PARQ_DICT} ...")
+    con.execute(f"""
+        COPY (
+            SELECT 
+                row_number() OVER (ORDER BY term) AS termid, 
+                term, 
+                COUNT(DISTINCT docid) AS df
+            FROM v_token_stream
+            GROUP BY term
+        ) TO '{PARQ_DICT}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    """)
 
-    # Write buffers for streaming Parquet writes
-    docs_docid_buf, docs_len_buf = [], []
-    docs_rows_in_buf = 0
+    # 3. Build and Write Docs Index (docs.parquet)
+    # Calculates length directly from data to capture documents with 0 tokens safely
+    print(f"Building docs index -> {PARQ_DOCS} ...")
+    con.execute(f"""
+        COPY (
+            SELECT 
+                docid, 
+                len(regexp_extract_all(lower(content), '[a-z]+')) AS len
+            FROM my_ducklake.data
+        ) TO '{PARQ_DOCS}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    """)
 
-    post_tid_buf, post_docid_buf, post_tf_buf = [], [], []
-    post_rows_in_buf = 0
-
-    # Parquet writers (kept open, append row groups)
-    docs_schema = pa.schema([pa.field("docid", pa.int64()),
-                             pa.field("len",   pa.int64())])
-    docs_writer = pq.ParquetWriter(
-        where=str(PARQ_DOCS),
-        schema=docs_schema,
-        compression=PARQUET_COMPRESSION,
-        write_statistics=True,
-    )
-
-    post_schema = pa.schema([pa.field("termid", pa.int64()),
-                             pa.field("docid",  pa.int64()),
-                             pa.field("tf",     pa.int64())])
-    post_writer = pq.ParquetWriter(
-        where=str(PARQ_POST),
-        schema=post_schema,
-        compression=PARQUET_COMPRESSION,
-        write_statistics=True,
-    )
-
-    # Local bindings to reduce attribute lookups inside the loop
-    append_docs_id = docs_docid_buf.append
-    append_docs_len = docs_len_buf.append
-    append_post_tid = post_tid_buf.append
-    append_post_doc = post_docid_buf.append
-    append_post_tf  = post_tf_buf.append
-    tokenize_fn = tokenize
-    setdefault = dict.setdefault
-    import numpy as _np  # local alias for faster array construction
-
-    # Main streaming loop
-    for docid, content in _iter_data(con):
-        text = "" if content is None else str(content)
-        toks = tokenize_fn(text)
-
-        # docs row buffer
-        append_docs_id(int(docid))
-        append_docs_len(len(toks))
-        docs_rows_in_buf += 1
-
-        # flush docs in row groups
-        if docs_rows_in_buf >= DOCS_FLUSH_ROWS:
-            table = pa.Table.from_arrays(
-                [
-                    pa.array(_np.asarray(docs_docid_buf, dtype=_np.int64)),
-                    pa.array(_np.asarray(docs_len_buf,   dtype[_np.int64] if False else _np.int64)),
-                ],
-                schema=docs_schema,
-            )
-            docs_writer.write_table(table)
-            docs_docid_buf.clear(); docs_len_buf.clear()
-            docs_rows_in_buf = 0
-
-        # empty doc => no postings
-        if not toks:
-            continue
-
-        tf = Counter(toks)
-
-        # postings + df tracking
-        for term, freq in tf.items():
-            tid = setdefault(term_to_id, term, next_tid)
-            if tid == next_tid:
-                next_tid += 1
-            append_post_tid(tid)
-            append_post_doc(int(docid))
-            append_post_tf(int(freq))
-            post_rows_in_buf += 1
-
-        # increment DF once per doc-term
-        for term in tf:
-            df_counter[term_to_id[term]] += 1
-
-        # flush postings in row groups
-        if post_rows_in_buf >= POSTINGS_FLUSH_ROWS:
-            table = pa.Table.from_arrays(
-                [
-                    pa.array(_np.asarray(post_tid_buf,   dtype=_np.int64)),
-                    pa.array(_np.asarray(post_docid_buf, dtype=_np.int64)),
-                    pa.array(_np.asarray(post_tf_buf,    dtype=_np.int64)),
-                ],
-                schema=post_schema,
-            )
-            post_writer.write_table(table)
-            post_tid_buf.clear(); post_docid_buf.clear(); post_tf_buf.clear()
-            post_rows_in_buf = 0
-
-    # Final flushes
-    if docs_rows_in_buf:
-        table = pa.Table.from_arrays(
-            [
-                pa.array(np.asarray(docs_docid_buf, dtype=np.int64)),
-                pa.array(np.asarray(docs_len_buf,   dtype=np.int64)),
-            ],
-            schema=docs_schema,
-        )
-        docs_writer.write_table(table)
-
-    if post_rows_in_buf:
-        table = pa.Table.from_arrays(
-            [
-                pa.array(np.asarray(post_tid_buf,   dtype=np.int64)),
-                pa.array(np.asarray(post_docid_buf, dtype=np.int64)),
-                pa.array(np.asarray(post_tf_buf,    dtype=np.int64)),
-            ],
-            schema=post_schema,
-        )
-        post_writer.write_table(table)
-
-    docs_writer.close()
-    post_writer.close()
-
-    # Build dict.parquet (small; safe to materialize from memory)
-    if DETERMINISTIC_TERMIDS:
-        # Stable termids by sorted term order (slower)
-        sorted_terms = sorted(term_to_id.keys())
-        remap = {term_to_id[t]: i + 1 for i, t in enumerate(sorted_terms)}
-        df_counter = defaultdict(int, {remap[tid]: df_counter[tid] for tid in df_counter})
-        termids = np.asarray([i + 1 for i in range(len(sorted_terms))], dtype=np.int64)
-        terms = pa.array(sorted_terms, type=pa.string())
-        dfs = np.asarray([df_counter.get(i + 1, 0) for i in range(len(sorted_terms))], dtype=np.int64)
-    else:
-        items = list(term_to_id.items())  # (term, tid)
-        terms_list = [t for t, _ in items]
-        termids = np.asarray([tid for _, tid in items], dtype=np.int64)
-        terms = pa.array(terms_list, type=pa.string())
-        dfs = np.asarray([df_counter.get(tid, 0) for tid in termids], dtype=np.int64)
-
-    dict_table = pa.Table.from_arrays(
-        [pa.array(termids), terms, pa.array(dfs)],
-        names=["termid", "term", "df"],
-    )
-    pq.write_table(
-        dict_table,
-        where=str(PARQ_DICT),
-        compression=PARQUET_COMPRESSION,
-        write_statistics=True,
-        use_dictionary=True,
-    )
+    # 4. Build and Write Postings (postings.parquet)
+    # Joins the token stream with the Dictionary we just wrote
+    print(f"Building postings -> {PARQ_POST} ...")
+    con.execute(f"""
+        COPY (
+            SELECT 
+                d.termid, 
+                t.docid, 
+                COUNT(*) AS tf
+            FROM v_token_stream t
+            JOIN '{PARQ_DICT}' d ON t.term = d.term
+            GROUP BY d.termid, t.docid
+        ) TO '{PARQ_POST}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    """)
+    
+    # Cleanup view
+    con.execute("DROP VIEW IF EXISTS v_token_stream")
 
 # ---------------------------------------------------------------------
 # Public: load Parquets into DuckLake
@@ -283,7 +156,7 @@ def reindex(con):
     Rebuild index from my_ducklake.main.data and publish into DuckLake.
 
     Steps:
-      1) Stream data -> write Parquet artifacts
+      1) Stream data -> write Parquet artifacts (via optimized SQL)
       2) Load artifacts into my_ducklake.{dict,docs,postings}
     """
     import os

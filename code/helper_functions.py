@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 import time
 import duckdb
+import pandas
 # ---------------------------------------------------------------------
 # Project Path Constants
 # ---------------------------------------------------------------------

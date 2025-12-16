@@ -40,7 +40,7 @@ fi
 echo "Installing dependencies..."
 # Using --no-update-deps to speed up if already installed
 conda run -n "$ENV_NAME" conda install -y -c conda-forge \
-  "duckdb>=1.4.1" numpy pyarrow matplotlib
+  "duckdb>=1.4.1" numpy pyarrow matplotlib pandas
 
 # --- Verify installation ---
 echo "Verifying package installation..."
