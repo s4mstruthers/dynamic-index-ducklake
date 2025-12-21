@@ -159,9 +159,7 @@ def reindex(con):
       1) Stream data -> write Parquet artifacts (via optimized SQL)
       2) Load artifacts into my_ducklake.{dict,docs,postings}
     """
-    import os
-    threads = max(1, (os.cpu_count() or 1))
-    con.execute(f"PRAGMA threads={threads};")
+    
 
     build_index_to_parquet_from_ducklake(con)
     import_index_parquets_into_ducklake(con)
