@@ -371,117 +371,115 @@ def delete_N_rand(con, N):
 
 def insert(con, doc, docid=None):
     """
-    Insert/replace a document and upsert associated index rows.
-
-    - Tokenizes content, computes TFs per term.
-    - Assigns a new docid if not provided (MAX(docid)+1).
-    - Upserts dict/df, docs/len, postings/tf, and data/content.
-    Returns the final docid.
+    Insert a new document. 
+    
+    Guardrail:
+    - If docid is None: Auto-increments.
+    - If docid is Provided: It MUST NOT exist in the index yet.
+      (This ensures updates only happen via modify(), which cleans up first).
     """
-    tokens = tokenize(doc)
-    if not tokens:
-        return None
 
-    tf = Counter(tokens)
-    distinct_terms = list(tf.keys())
-    doc_len = len(tokens)
+    # --- Guardrail: Prevent accidental corruption ---
+    if docid is not None:
+        # Check if this ID is already in use
+        exists = con.execute(
+            "SELECT 1 FROM my_ducklake.docs WHERE docid = ?", [docid]
+        ).fetchone()
+        
+        if exists:
+            raise ValueError(
+                f"DocID {docid} already exists. You cannot overwrite it directly using insert(). "
+                f"Please use modify(con, {docid}, content) instead, which handles cleanup safely."
+            )
 
     con.execute("BEGIN")
     try:
-        # Stage terms and tf counts for this document
-        con.execute("CREATE TEMP TABLE src_terms(term TEXT, tf BIGINT)")
-        con.executemany(
-            "INSERT INTO src_terms(term, tf) VALUES (?, ?)",
-            [(t, tf[t]) for t in distinct_terms],
-        )
+        # 1. Stage the input
+        con.execute("CREATE TEMP TABLE input_stage(docid BIGINT, content TEXT)")
+        con.execute("INSERT INTO input_stage VALUES (?, ?)", [docid, doc])
 
-        # Resolve docid: fixed if provided, else MAX+1 from docs
-        con.execute(
-            """
-            CREATE TEMP TABLE docid_sql AS
-            SELECT
-                COALESCE(?, (SELECT COALESCE(MAX(docid), 0) + 1 FROM my_ducklake.docs)) AS docid
-            """,
-            [docid],
-        )
+        # 2. Resolve DocID and Length
+        #    Logic: If input docid is NULL, calculate MAX+1.
+        con.execute("""
+            CREATE TEMP TABLE target_doc AS
+            SELECT 
+                COALESCE(i.docid, (SELECT COALESCE(MAX(d.docid), 0) + 1 FROM my_ducklake.docs d)) AS docid,
+                i.content,
+                len(regexp_extract_all(lower(i.content), '[a-z]+')) AS doc_len
+            FROM input_stage i
+        """)
 
-        # Upsert dict (assign new termids for unseen terms, bump df for seen)
-        con.execute(
-            """
-            WITH base AS (SELECT COALESCE(MAX(termid), 0) AS base FROM my_ducklake.dict),
-            dedup AS (SELECT DISTINCT term, tf FROM src_terms),
-            annot AS (
+        # 3. Tokenize and count TF (Pure SQL)
+        con.execute("""
+            CREATE TEMP TABLE doc_terms AS
+            WITH raw_tokens AS (
+                SELECT UNNEST(regexp_extract_all(lower(content), '[a-z]+')) AS term
+                FROM input_stage
+            )
+            SELECT term, COUNT(*) AS tf
+            FROM raw_tokens
+            GROUP BY term
+        """)
+
+        # 4. Upsert Dictionary (merging with current index)
+        #    We are adding counts to existing words or creating new ones.
+        con.execute("""
+            WITH base AS (SELECT COALESCE(MAX(termid), 0) AS max_id FROM my_ducklake.dict),
+            annotated AS (
+                SELECT 
+                    dt.term,
+                    d.termid,
+                    ROW_NUMBER() OVER (PARTITION BY (d.termid IS NULL) ORDER BY dt.term) AS rn
+                FROM doc_terms dt
+                LEFT JOIN my_ducklake.dict d ON dt.term = d.term
+            ),
+            source AS (
                 SELECT
-                    d.termid AS existing_tid,
-                    s.term,
-                    s.tf,
-                    CASE WHEN d.termid IS NULL
-                         THEN (SELECT base FROM base) + ROW_NUMBER() OVER (ORDER BY s.term)
-                         ELSE d.termid
-                    END AS ins_tid
-                FROM dedup s
-                LEFT JOIN my_ducklake.dict d ON d.term = s.term
+                    term,
+                    COALESCE(termid, (SELECT max_id FROM base) + rn) AS final_termid
+                FROM annotated
             )
             MERGE INTO my_ducklake.dict AS tgt
-            USING annot AS a
-            ON (tgt.term = a.term)
-            WHEN MATCHED THEN UPDATE SET df = tgt.df + 1
-            WHEN NOT MATCHED THEN INSERT (termid, term, df) VALUES (a.ins_tid, a.term, 1)
-            """
-        )
+            USING source
+            ON (tgt.term = source.term)
+            WHEN MATCHED THEN 
+                UPDATE SET df = tgt.df + 1
+            WHEN NOT MATCHED THEN 
+                INSERT (termid, term, df) VALUES (source.final_termid, source.term, 1)
+        """)
 
-        # Upsert docs row (len)
-        con.execute(
-            """
-            MERGE INTO my_ducklake.docs AS d
-            USING (SELECT docid FROM docid_sql) AS s
-            ON (d.docid = s.docid)
-            WHEN MATCHED THEN UPDATE SET len = ?
-            WHEN NOT MATCHED THEN INSERT (docid, len) VALUES (s.docid, ?)
-            """,
-            [doc_len, doc_len],
-        )
+        # 5. Insert Docs
+        con.execute("""
+            INSERT INTO my_ducklake.docs (docid, len)
+            SELECT docid, doc_len FROM target_doc
+        """)
 
-        # Upsert postings for this doc
-        con.execute(
-            """
-            WITH term_ids AS (
-                SELECT d.termid, s.term, s.tf
-                FROM src_terms s
-                JOIN my_ducklake.dict d ON d.term = s.term
-            ),
-            src_post AS (
-                SELECT t.termid, ds.docid, t.tf
-                FROM term_ids t
-                CROSS JOIN docid_sql ds
-            )
-            MERGE INTO my_ducklake.postings AS p
-            USING src_post AS sp
-            ON (p.termid = sp.termid AND p.docid = sp.docid)
-            WHEN MATCHED THEN UPDATE SET tf = sp.tf
-            WHEN NOT MATCHED THEN INSERT (termid, docid, tf) VALUES (sp.termid, sp.docid, sp.tf)
-            """
-        )
+        # 6. Insert Postings
+        con.execute("""
+            INSERT INTO my_ducklake.postings (termid, docid, tf)
+            SELECT d.termid, td.docid, dt.tf
+            FROM doc_terms dt
+            JOIN target_doc td ON 1=1
+            JOIN my_ducklake.dict d ON dt.term = d.term
+        """)
 
-        # Upsert raw content
-        con.execute(
-            """
-            MERGE INTO my_ducklake.data AS t
-            USING (SELECT docid, ? AS content FROM docid_sql) AS s
-            ON (t.docid = s.docid)
-            WHEN MATCHED THEN UPDATE SET content = s.content
-            WHEN NOT MATCHED THEN INSERT (docid, content) VALUES (s.docid, s.content)
-            """,
-            [doc],
-        )
+        # 7. Insert Content
+        con.execute("""
+            INSERT INTO my_ducklake.data (docid, content)
+            SELECT docid, content FROM target_doc
+        """)
 
-        final_docid = con.execute("SELECT docid FROM docid_sql").fetchone()[0]
+        # 8. Retrieve final docid
+        final_docid = con.execute("SELECT docid FROM target_doc").fetchone()[0]
 
-        con.execute("DROP TABLE IF EXISTS src_terms")
-        con.execute("DROP TABLE IF EXISTS docid_sql")
+        # Cleanup
+        con.execute("DROP TABLE input_stage")
+        con.execute("DROP TABLE target_doc")
+        con.execute("DROP TABLE doc_terms")
 
         con.execute("COMMIT")
         return final_docid
+
     except Exception:
         con.execute("ROLLBACK")
         raise
