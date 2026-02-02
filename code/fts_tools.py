@@ -67,7 +67,7 @@ def conjunctive_bm25(con, query, top_n):
         idf_table AS (
           SELECT
             dict.termid AS termid,
-            ln((stats.N - dict.df + 0.5) / (dict.df + 0.5)) AS idf
+            ln((stats.N - dict.df + 0.5) / (dict.df + 0.5) + 1 ) AS idf
           FROM my_ducklake.dict AS dict, corpus_stats AS stats
           WHERE dict.termid IN (SELECT termid FROM query_terms)
         ),
@@ -151,7 +151,7 @@ def disjunctive_bm25(con, query, top_n):
         idf_table AS (
           SELECT
             dict.termid AS termid,
-            ln((stats.N - dict.df + 0.5) / (dict.df + 0.5)) AS idf
+            ln((stats.N - dict.df + 0.5) / (dict.df + 0.5) + 1) AS idf
           FROM my_ducklake.dict AS dict, corpus_stats AS stats
           WHERE dict.termid IN (SELECT termid FROM query_terms)
         ),

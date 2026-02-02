@@ -17,7 +17,7 @@ Modes:
   - reindex         : Rebuild index artifacts from current data.
   - delete          : Delete a specific document ID.
   - checkpoint      : Manually trigger a DuckLake checkpoint and rewrite.
-  - reset           : Hard reset: delete DB files and restore Parquets from backup.
+  - reset           : Hard reset: delete DB files (keeps source parquets).
   - perf-test       : Run the performance testing loop (generate queries -> measure -> delete -> repeat).
   - plot-comparison : Generate comparison plots from multiple performance result CSVs.
 """
@@ -67,8 +67,6 @@ PERF_PLOTS_DIR = RESULTS_DIR / "performance_plots"
 QUERY_TERMS_DIR = RESULTS_DIR / "query_terms"
 
 # Specific paths for Reset Logic
-WEBCRAWL_DIR = PARQUET_FOLDER / "webcrawl_data"
-BACKUP_DIR = PARQUET_FOLDER / "backup_parquets"
 DUCKLAKE_METADATA_FILE = DUCKLAKE_FOLDER / "metadata_catalog.ducklake"
 DUCKLAKE_DATA_FILES = DUCKLAKE_FOLDER / "data_files"
 
@@ -83,14 +81,15 @@ for d in [PERF_RESULTS_DIR, PERF_PLOTS_DIR, QUERY_TERMS_DIR]:
 
 def run_hard_reset():
     """
-    Performs a 'hard reset' of the environment to ensure a fresh state.
-    1. Deletes DuckLake metadata and data folders (dict, docs, postings, data).
-    2. Wipes 'webcrawl_data' folder.
-    3. Restores parquet files from 'backup_parquets' to 'webcrawl_data'.
+    Performs a 'hard reset' of the DuckLake environment.
+    1. Deletes DuckLake metadata file.
+    2. Deletes DuckLake data_files directory.
+    
+    NOTE: This DOES NOT touch the source parquet files in 'webcrawl_data'.
     """
-    print("--- INITIATING HARD RESET ---")
+    print("--- INITIATING HARD RESET (DB ONLY) ---")
 
-    # 1. Clean DuckLake Files
+    # 1. Clean DuckLake Metadata
     if DUCKLAKE_METADATA_FILE.exists():
         try:
             os.remove(DUCKLAKE_METADATA_FILE)
@@ -98,8 +97,8 @@ def run_hard_reset():
         except OSError as e:
             print(f"[WARN] Could not delete metadata file: {e}")
 
-    # Delete the data_files directory (contains main/dict, main/docs, etc.)
-    # We remove the entire data_files structure to be clean.
+    # 2. Clean DuckLake Data Folder
+    # (contains main/dict, main/docs, main/postings, etc.)
     if DUCKLAKE_DATA_FILES.exists():
         try:
             shutil.rmtree(DUCKLAKE_DATA_FILES)
@@ -107,32 +106,6 @@ def run_hard_reset():
         except OSError as e:
             print(f"[WARN] Could not delete data_files folder: {e}")
 
-    # 2. Clean Webcrawl Data
-    if WEBCRAWL_DIR.exists():
-        for f in WEBCRAWL_DIR.glob("*.parquet"):
-            try:
-                f.unlink()
-            except OSError as e:
-                print(f"[WARN] Failed to delete {f.name}: {e}")
-        print(f"Cleared *.parquet from: {WEBCRAWL_DIR.name}")
-    else:
-        WEBCRAWL_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 3. Restore from Backup
-    if not BACKUP_DIR.exists():
-        print(f"[ERROR] Backup directory not found: {BACKUP_DIR}")
-        print("Skipping restoration step. Please ensure backup_parquets exists.")
-        return
-
-    backup_files = list(BACKUP_DIR.glob("*.parquet"))
-    if not backup_files:
-        print(f"[WARN] No parquet files found in backup: {BACKUP_DIR}")
-        return
-
-    print(f"Restoring {len(backup_files)} parquet files from backup...")
-    for f in backup_files:
-        shutil.copy2(f, WEBCRAWL_DIR / f.name)
-    
     print("--- HARD RESET COMPLETE ---")
 
 
@@ -354,7 +327,7 @@ def plot_single_result(results_csv, qtype, top_n, output_png=None, random=False,
 def run_performance_test(args):
     """
     Orchestrate the performance testing loop.
-    1. (Optional) Hard reset environment.
+    1. (Optional) Hard reset environment (DB only).
     2. Initialise/Reindex.
     3. Generate/Load queries.
     4. Loop: Measure avg time -> Log -> Delete batch -> Checkpoint (optional).
@@ -370,11 +343,11 @@ def run_performance_test(args):
     print("--- STARTING PERFORMANCE TEST ---")
     
     # 1. Ensure Data Exists
-    # If we just reset, the data table is gone. We must re-initialise from the restored parquets.
+    # If we just reset, the data table is gone. We must re-initialise from existing parquets.
     if args.reset:
-        print("Reset detected: Initialising data from restored parquets...")
-        # FIX: Pass "ALL" explicitly as a string
-        initialise_data(con, parquet="ALL", limit=None)
+        print("Reset detected: Initialising data from all parquets in webcrawl_data...")
+        # Automatically select all parquets
+        initialise_data(con, parquet="*", limit=None)
         print("Data imported. Reindexing...")
         reindex(con)
     else:
@@ -639,7 +612,7 @@ if __name__ == "__main__":
     subparsers.add_parser("checkpoint", help="Manually trigger DuckLake checkpoint rewrite")
     
     # Reset
-    subparsers.add_parser("reset", help="Hard Reset: Wipe DB and restore Parquets from backup")
+    subparsers.add_parser("reset", help="Hard Reset: Wipe DB files only (source parquets preserved)")
 
     # Query
     p_query = subparsers.add_parser("query", help="Run a BM25 query")
@@ -653,7 +626,7 @@ if __name__ == "__main__":
     p_import.add_argument("--parquet", type=str, required=True)
 
     p_init = subparsers.add_parser("initialise", help="Rebuild data from Parquet + Reindex")
-    p_init.add_argument("--parquet", type=str, default="metadata_0.parquet")
+    p_init.add_argument("--parquet", type=str, default="*", help="Parquet file(s) relative to webcrawl_data")
     p_init.add_argument("--limit", type=int, default=None)
 
     # Delete
@@ -663,12 +636,12 @@ if __name__ == "__main__":
     # --- Performance Testing Mode ---
     p_perf = subparsers.add_parser("perf-test", help="Run performance testing loop")
     p_perf.add_argument("--query-count", type=int, default=100, help="Queries per iteration")
-    p_perf.add_argument("--delete-batch", type=int, default=1000, help="Docs to delete per step")
+    p_perf.add_argument("--delete-batch", type=int, default=10000, help="Docs to delete per step")
     p_perf.add_argument("--qtype", choices=["conjunctive", "disjunctive"], default="disjunctive")
     p_perf.add_argument("--top", dest="top_n", type=int, default=10)
     p_perf.add_argument("--random", action="store_true", help="Randomize delete order")
     p_perf.add_argument("--checkpoint-pct", type=float, default=0.0, help="Checkpoint every N%% deleted")
-    p_perf.add_argument("--reset", action="store_true", help="Run Hard Reset (Wipe & Restore) before starting test")
+    p_perf.add_argument("--reset", action="store_true", help="Run Hard Reset (DB Wipe) before starting test")
     
     p_perf.add_argument("--plot", action="store_true", help="Plot result immediately after test")
     p_perf.add_argument("--plot-file", type=str, help="Custom filename for the single run plot")
