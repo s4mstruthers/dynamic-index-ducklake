@@ -10,6 +10,9 @@ parquet/
 # macOS
 .DS_Store
 
-results/performance_plots/*.png
-results/performance_results/*.csv
-results/query_terms/*.csv
+results/performance_plots/
+results/performance_results/
+results/query_terms/
+
+**/__pycache__/
+*.pyc
