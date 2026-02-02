@@ -3,13 +3,6 @@
 # Also supports point updates.
 
 # ---------------------------------------------------------------------
-# Tuning knobs (scale/perf)
-# ---------------------------------------------------------------------
-# Note: Parquet specific knobs (row group sizes, compression) removed.
-# BATCH_SIZE kept if needed for other external fetch logic.
-BATCH_SIZE = 50_000 
-
-# ---------------------------------------------------------------------
 # Public: Full Rebuild
 # ---------------------------------------------------------------------
 def reindex(con):

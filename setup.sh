@@ -45,10 +45,10 @@ conda run -n "$ENV_NAME" conda install -y -c conda-forge \
 # --- Verify installation ---
 echo "Verifying package installation..."
 conda run --no-capture-output -n "$ENV_NAME" python - <<'EOF'
-import duckdb, numpy, pyarrow
+import duckdb, numpy, pyarrow, pandas, matplotlib
 print(f"duckdb: {duckdb.__version__}")
 assert tuple(int(x) for x in duckdb.__version__.split('.')[:3]) >= (1,4,1)
-print("All required packages imported successfully.")
+print("All required packages (duckdb, numpy, pyarrow, pandas, matplotlib) imported successfully.")
 EOF
 
 # --- Create COMPLETE Project Directory Structure ---
