@@ -3,20 +3,18 @@ import re
 import time
 import duckdb
 import pandas
+
 # ---------------------------------------------------------------------
 # Project Path Constants
 # ---------------------------------------------------------------------
-# Defines fixed directories relative to project layout.
-# BASE_DIR -> /code/
-# DUCKLAKE_FOLDER -> /ducklake/
-# PARQUET_FOLDER -> /parquet/
-# TEST_FOLDER -> /test/
 BASE_DIR = Path(__file__).resolve().parent
 DUCKLAKE_FOLDER = BASE_DIR.parent / "ducklake"
 DUCKLAKE_DATA = DUCKLAKE_FOLDER / "data_files"
 DUCKLAKE_METADATA = DUCKLAKE_FOLDER / "metadata_catalog.ducklake"
 TEST_FOLDER = BASE_DIR.parent / "test"
-PARQUET_FOLDER = BASE_DIR.parent / "parquet"
+
+# Used for raw input data (webcrawls)
+PARQUET_FOLDER = BASE_DIR.parent / "parquet" 
 
 # ---------------------------------------------------------------------
 # DuckLake Attachment
@@ -24,10 +22,6 @@ PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 def connect_ducklake(con):
     """
     Attach (or create) the DuckLake catalog as `my_ducklake`.
-
-    - Ensures directories exist before attaching.
-    - Automatically installs and loads required DuckDB extensions.
-    - ATTACH creates the catalog if the file does not yet exist.
     """
     DUCKLAKE_DATA.mkdir(parents=True, exist_ok=True)
 
@@ -49,15 +43,17 @@ def connect_ducklake(con):
 def test_ducklake(con):
     """
     Inspect schema and preview table contents for DuckLake tables.
-    Used for debugging schema correctness and verifying attach success.
     """
     con.execute("USE my_ducklake")
 
     for tbl in ["dict", "docs", "postings"]:
         print(f"Describe {tbl}:")
-        print(con.execute(f"DESCRIBE my_ducklake.{tbl}").fetch_df(), "\n")
-        print(f"Top 2 rows in {tbl}:")
-        print(con.execute(f"SELECT * FROM my_ducklake.{tbl} LIMIT 2").fetch_df(), "\n")
+        try:
+            print(con.execute(f"DESCRIBE my_ducklake.{tbl}").fetch_df(), "\n")
+            print(f"Top 2 rows in {tbl}:")
+            print(con.execute(f"SELECT * FROM my_ducklake.{tbl} LIMIT 2").fetch_df(), "\n")
+        except duckdb.CatalogException:
+            print(f"Table {tbl} does not exist yet.\n")
 
 # ---------------------------------------------------------------------
 # Query Utilities
@@ -65,8 +61,6 @@ def test_ducklake(con):
 def get_termid(con, term):
     """
     Retrieve the termid for a given term from `my_ducklake.dict`.
-    Returns None if the term is not present OR if the index is 
-    momentarily unreadable due to a delete merge.
     """
     try:
         row = con.execute(
@@ -76,9 +70,7 @@ def get_termid(con, term):
         return row[0] if row else None
         
     except duckdb.IOException:
-        # Catch the "Could not read enough bytes" error.
-        # If the file is in flux due to a delete, we treat the term 
-        # as missing for this specific millisecond.
+        # Handle transient read errors during massive updates/checkpoints
         return None
 
 def get_docid_count(con):
@@ -96,8 +88,6 @@ _WORD_RE = re.compile(r"[A-Za-z]+")
 def tokenize(content: str) -> list[str]:
     """
     Tokenize input text into lowercase alphabetic terms.
-    Non-alphabetic characters are ignored.
-    Example: "AI-driven systems (2025)!" → ["ai", "driven", "systems"]
     """
     if not content:
         return []
@@ -106,7 +96,6 @@ def tokenize(content: str) -> list[str]:
 def tokenize_query(con, query):
     """
     Tokenize a query string and map known tokens to termids.
-    Terms not found in `dict` are discarded.
     """
     tokens = tokenize(query)
     return [tid for term in tokens if (tid := get_termid(con, term)) is not None]
@@ -114,27 +103,24 @@ def tokenize_query(con, query):
 # ---------------------------------------------------------------------
 # Data Ingest / Initialization
 # ---------------------------------------------------------------------
-def initialise_data(con, parquet="metadata_0.parquet", limit=None):
+def initialise_data(con, parquet="*", limit=None):
     """
-    Create or replace `my_ducklake.data` from one or more Parquet files.
-
-    Supported 'parquet' inputs:
-      - File name within /parquet/webcrawl_data/
-      - Absolute or relative path to a single file
-      - Directory path (imports all *.parquet files)
-      - 'ALL' or '*' to import all files in /parquet/webcrawl_data/
-
-    Ensures deterministic ordering by docid and optional row limiting.
+    Create or replace `my_ducklake.data` from raw Parquet files.
+    Defaults to importing ALL *.parquet files from /parquet/
     """
     con.execute("USE my_ducklake")
 
-    webcrawl_dir = (PARQUET_FOLDER / "webcrawl_data").resolve()
-    parquet_arg = str(parquet).strip() if parquet else "ALL"
+    # FIX 1: Point directly to PARQUET_FOLDER, not a subfolder
+    webcrawl_dir = PARQUET_FOLDER.resolve()
+    
+    # If None or empty, default to "*"
+    parquet_arg = str(parquet).strip() if parquet else "*"
 
     # Resolve file or directory source
     if parquet_arg.upper() in {"ALL", "*"}:
         src = (webcrawl_dir / "*.parquet").as_posix()
     else:
+        # User specified a file or folder relative to parquet folder (or absolute)
         p = Path(parquet_arg)
         if p.is_absolute():
             src = (p / "*.parquet").as_posix() if p.is_dir() else p.as_posix()
@@ -153,44 +139,34 @@ def initialise_data(con, parquet="metadata_0.parquet", limit=None):
 
     con.execute("DROP TABLE IF EXISTS data")
 
-    # Create the data table (glob patterns supported by DuckDB)
-    if limit is None:
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE data AS
-            SELECT
-                CAST(docid AS BIGINT)      AS docid,
-                CAST(main_content AS TEXT) AS content
-            FROM read_parquet(?)
-            ORDER BY docid
-            """,
-            [src],
-        )
-    else:
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE data AS
-            SELECT
-                CAST(docid AS BIGINT)      AS docid,
-                CAST(main_content AS TEXT) AS content
-            FROM read_parquet(?)
-            ORDER BY docid
-            LIMIT ?
-            """,
-            [src, int(limit)],
-        )
+    # Build SQL query based on limit
+    sql = """
+        CREATE OR REPLACE TABLE data AS
+        SELECT
+            CAST(docid AS BIGINT)      AS docid,
+            CAST(main_content AS TEXT) AS content
+        FROM read_parquet(?)
+        ORDER BY docid
+    """
+    
+    # FIX 2: Explicitly type 'params' as list[object] to fix Pylance error
+    params: list[object] = [src]
+    
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+
+    con.execute(sql, params)
 
 # ---------------------------------------------------------------------
 # Incremental Import / Upsert
 # ---------------------------------------------------------------------
 def import_data(con, parquet):
     """
-    Upsert Parquet data into `my_ducklake.data` via MERGE INTO.
-
-    - Updates content if docid already exists.
-    - Inserts new rows if docid not found.
+    Upsert Parquet data into `my_ducklake.data`.
     """
-    src = (BASE_DIR.parent / "parquet" / parquet).resolve().as_posix()
+    # Standardized to use PARQUET_FOLDER constant
+    src = (PARQUET_FOLDER / parquet).resolve().as_posix()
 
     con.execute("USE my_ducklake")
     con.execute("""
@@ -217,7 +193,6 @@ def import_data(con, parquet):
 # ---------------------------------------------------------------------
 # DuckLake Maintenance / Cleanup
 # ---------------------------------------------------------------------
-
 def checkpoint_rewrite(con):
     """
     Implements all the ducklake maintenance functions bundled

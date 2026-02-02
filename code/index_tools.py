@@ -1,49 +1,29 @@
 # index_tools.py
-# Build/replace BM25 index artifacts (dict/docs/postings) as Parquet,
-# and load them into the DuckLake catalog. Also supports point updates.
-
-from collections import Counter, defaultdict
-import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
-from helper_functions import PARQUET_FOLDER, tokenize
+# Build/replace BM25 index artifacts (dict/docs/postings) directly in DuckDB.
+# Also supports point updates.
 
 # ---------------------------------------------------------------------
 # Tuning knobs (scale/perf)
 # ---------------------------------------------------------------------
-BATCH_SIZE = 50_000              # rows fetched per round-trip from DuckDB (unused in SQL mode)
-DOCS_FLUSH_ROWS = 500_000        # docs rows per Parquet row group (unused in SQL mode)
-POSTINGS_FLUSH_ROWS = 2_000_000  # postings rows per Parquet row group (unused in SQL mode)
-PARQUET_COMPRESSION = "zstd"     # compression algo for all Parquet outputs
-DETERMINISTIC_TERMIDS = False    # True => tid by lexicographic term (slower)
+# Note: Parquet specific knobs (row group sizes, compression) removed.
+# BATCH_SIZE kept if needed for other external fetch logic.
+BATCH_SIZE = 50_000 
 
 # ---------------------------------------------------------------------
-# Parquet output locations (single-file artifacts; overwritten on build)
+# Public: Full Rebuild
 # ---------------------------------------------------------------------
-PARQ_DIR  = PARQUET_FOLDER / "index"
-PARQ_DICT = PARQ_DIR / "dict.parquet"
-PARQ_DOCS = PARQ_DIR / "docs.parquet"
-PARQ_POST = PARQ_DIR / "postings.parquet"
-
-# ---------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------
-def _ensure_dirs():
-    """Ensure Parquet output directory exists before writing artifacts."""
-    PARQ_DIR.mkdir(parents=True, exist_ok=True)
-
-# ---------------------------------------------------------------------
-# Public: full rebuild
-# ---------------------------------------------------------------------
-def build_index_to_parquet_from_ducklake(con):
+def reindex(con):
     """
-    Build index Parquets from my_ducklake.main.data using vectorized SQL.
+    Rebuild index tables (dict, docs, postings) directly from my_ducklake.data
+    using vectorized SQL.
     """
-    _ensure_dirs()
+    con.execute("USE my_ducklake")
+    
+    # REMOVED: con.execute("BEGIN") to prevent IO/visibility race conditions
+    # with the ducklake extension during file creation.
 
     # 1. Create a transient view of all tokens (matching Python's regex [a-z]+)
     # We use regexp_extract_all to get a list, then UNNEST to explode it into rows.
-    con.execute("USE my_ducklake")
     con.execute("""
         CREATE OR REPLACE TEMP VIEW v_token_stream AS 
         SELECT 
@@ -52,117 +32,48 @@ def build_index_to_parquet_from_ducklake(con):
         FROM my_ducklake.data
     """)
 
-    # 2. Build and Write Dictionary (dict.parquet)
+    # 2. Build Dictionary Table
     # Uses row_number() for deterministic IDs (sorted by term)
-    print(f"Building dictionary -> {PARQ_DICT} ...")
-    con.execute(f"""
-        COPY (
-            SELECT 
-                row_number() OVER (ORDER BY term) AS termid, 
-                term, 
-                COUNT(DISTINCT docid) AS df
-            FROM v_token_stream
-            GROUP BY term
-        ) TO '{PARQ_DICT}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    print("Building table -> my_ducklake.dict ...")
+    con.execute("""
+        CREATE OR REPLACE TABLE dict AS
+        SELECT 
+            row_number() OVER (ORDER BY term) AS termid, 
+            term, 
+            COUNT(DISTINCT docid) AS df
+        FROM v_token_stream
+        GROUP BY term
     """)
 
-    # 3. Build and Write Docs Index (docs.parquet)
+    # 3. Build Docs Index Table
     # Calculates length directly from data to capture documents with 0 tokens safely
-    print(f"Building docs index -> {PARQ_DOCS} ...")
-    con.execute(f"""
-        COPY (
-            SELECT 
-                docid, 
-                len(regexp_extract_all(lower(content), '[a-z]+')) AS len
-            FROM my_ducklake.data
-        ) TO '{PARQ_DOCS}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    print("Building table -> my_ducklake.docs ...")
+    con.execute("""
+        CREATE OR REPLACE TABLE docs AS
+        SELECT 
+            docid, 
+            len(regexp_extract_all(lower(content), '[a-z]+')) AS len
+        FROM my_ducklake.data
     """)
 
-    # 4. Build and Write Postings (postings.parquet)
-    # Joins the token stream with the Dictionary we just wrote
-    print(f"Building postings -> {PARQ_POST} ...")
-    con.execute(f"""
-        COPY (
-            SELECT 
-                d.termid, 
-                t.docid, 
-                COUNT(*) AS tf
-            FROM v_token_stream t
-            JOIN '{PARQ_DICT}' d ON t.term = d.term
-            GROUP BY d.termid, t.docid
-        ) TO '{PARQ_POST}' (FORMAT PARQUET, COMPRESSION '{PARQUET_COMPRESSION}')
+    # 4. Build Postings Table
+    # Joins the token stream with the Dictionary we just created
+    print("Building table -> my_ducklake.postings ...")
+    con.execute("""
+        CREATE OR REPLACE TABLE postings AS
+        SELECT 
+            d.termid, 
+            t.docid, 
+            COUNT(*) AS tf
+        FROM v_token_stream t
+        JOIN my_ducklake.dict d ON t.term = d.term
+        GROUP BY d.termid, t.docid
     """)
     
     # Cleanup view
     con.execute("DROP VIEW IF EXISTS v_token_stream")
-
-# ---------------------------------------------------------------------
-# Public: load Parquets into DuckLake
-# ---------------------------------------------------------------------
-def import_index_parquets_into_ducklake(con):
-    """
-    Replace my_ducklake.{dict,docs,postings} from local Parquet artifacts.
-    Raises if any required artifact is missing.
-    """
-    for p in (PARQ_DICT, PARQ_DOCS, PARQ_POST):
-        if not p.exists():
-            raise FileNotFoundError(f"Missing parquet file: {p}")
-
-    con.execute("USE my_ducklake")
-    con.execute("BEGIN")
-    try:
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE dict AS
-            SELECT CAST(termid AS BIGINT) AS termid,
-                   CAST(term   AS TEXT)   AS term,
-                   CAST(df     AS BIGINT) AS df
-            FROM read_parquet(?)
-            """,
-            [str(PARQ_DICT)],
-        )
-
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE docs AS
-            SELECT CAST(docid AS BIGINT) AS docid,
-                   CAST(len   AS BIGINT) AS len
-            FROM read_parquet(?)
-            """,
-            [str(PARQ_DOCS)],
-        )
-
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE postings AS
-            SELECT CAST(termid AS BIGINT) AS termid,
-                   CAST(docid  AS BIGINT) AS docid,
-                   CAST(tf     AS BIGINT) AS tf
-            FROM read_parquet(?)
-            """,
-            [str(PARQ_POST)],
-        )
-
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
-
-# ---------------------------------------------------------------------
-# Public: end-to-end rebuild
-# ---------------------------------------------------------------------
-def reindex(con):
-    """
-    Rebuild index from my_ducklake.main.data and publish into DuckLake.
-
-    Steps:
-      1) Stream data -> write Parquet artifacts (via optimized SQL)
-      2) Load artifacts into my_ducklake.{dict,docs,postings}
-    """
     
-
-    build_index_to_parquet_from_ducklake(con)
-    import_index_parquets_into_ducklake(con)
+    # REMOVED: con.execute("COMMIT")
 
 # ---------------------------------------------------------------------
 # Point updates (delete/insert/modify)
@@ -170,11 +81,6 @@ def reindex(con):
 def delete(con, docid):
     """
     Delete a document and repair index structures with minimal churn.
-
-    Strategy:
-      - Capture touched termids, decrement df once per touched term.
-      - Remove rows from postings/docs/data for the given docid.
-      - Drop temp state and commit atomically.
     """
     con.execute("BEGIN")
     try:
@@ -216,20 +122,13 @@ def delete(con, docid):
 def delete_N(con, N):
     """
     Delete N docs in one transaction and repair index structures in bulk.
-    Strategy:
-      - Choose top N docids into a TEMP table.
-      - Derive touched termids and how many of the N docs they appear in.
-      - Decrement df by those counts (clamped at 0).
-      - Remove postings/docs/data rows in bulk.
-      - Drop temp state and commit atomically.
     """
     con.execute("BEGIN")
     try:
-        # Fresh temp tables
         con.execute("DROP TABLE IF EXISTS del_docids")
         con.execute("DROP TABLE IF EXISTS touched_termids")
 
-        # Choose N random docids from docs
+        # Choose N docids
         con.execute("CREATE TEMP TABLE del_docids(docid BIGINT)")
         con.execute(
             "INSERT INTO del_docids "
@@ -237,7 +136,7 @@ def delete_N(con, N):
             [N],
         )
 
-        # Compute touched termids with multiplicity (tf across all docs to be deleted) across the N docs
+        # Compute touched termids
         con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT, cnt BIGINT)")
         con.execute(
             """
@@ -249,7 +148,7 @@ def delete_N(con, N):
             """
         )
 
-        # Decrement df for only touched termids (clamp at 0)
+        # Decrement df
         con.execute(
             """
             UPDATE my_ducklake.dict AS d
@@ -262,7 +161,7 @@ def delete_N(con, N):
             """
         )
 
-        # Remove terms whose df reached 0 and hence dont need to be stored anymore from only those we touched
+        # Cleanup zero df terms
         con.execute(
             """
             DELETE FROM my_ducklake.dict
@@ -271,21 +170,13 @@ def delete_N(con, N):
             """
         )
 
-        # Bulk delete postings/docs/data for the selected docids
-        con.execute(
-            "DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)"
-        )
-        con.execute(
-            "DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)"
-        )
-        con.execute(
-            "DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)"
-        )
+        # Bulk delete
+        con.execute("DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)")
 
-        # 6) Cleanup temp tables
         con.execute("DROP TABLE IF EXISTS touched_termids")
         con.execute("DROP TABLE IF EXISTS del_docids")
-
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
@@ -294,20 +185,13 @@ def delete_N(con, N):
 def delete_N_rand(con, N):
     """
     Delete N *random* docs in one transaction and repair index structures in bulk.
-    Strategy:
-      - Choose N random docids into a TEMP table.
-      - Derive touched termids and how many of the N docs they appear in.
-      - Decrement df by those counts (clamped at 0).
-      - Remove postings/docs/data rows in bulk.
-      - Drop temp state and commit atomically.
     """
     con.execute("BEGIN")
     try:
-        # Fresh temp tables
         con.execute("DROP TABLE IF EXISTS del_docids")
         con.execute("DROP TABLE IF EXISTS touched_termids")
 
-        # Choose N random docids from docs
+        # Choose N random docids
         con.execute("CREATE TEMP TABLE del_docids(docid BIGINT)")
         con.execute(
             "INSERT INTO del_docids "
@@ -315,7 +199,7 @@ def delete_N_rand(con, N):
             [N],
         )
 
-        # Compute touched termids with multiplicity (tf across all docs to be deleted) across the N docs
+        # Compute touched termids
         con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT, cnt BIGINT)")
         con.execute(
             """
@@ -327,7 +211,7 @@ def delete_N_rand(con, N):
             """
         )
 
-        # Decrement df for only touched termids (clamp at 0)
+        # Decrement df
         con.execute(
             """
             UPDATE my_ducklake.dict AS d
@@ -340,7 +224,7 @@ def delete_N_rand(con, N):
             """
         )
 
-        # Remove terms whose df reached 0 and hence dont need to be stored anymore from only those we touched
+        # Cleanup zero df terms
         con.execute(
             """
             DELETE FROM my_ducklake.dict
@@ -349,21 +233,13 @@ def delete_N_rand(con, N):
             """
         )
 
-        # Bulk delete postings/docs/data for the selected docids
-        con.execute(
-            "DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)"
-        )
-        con.execute(
-            "DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)"
-        )
-        con.execute(
-            "DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)"
-        )
+        # Bulk delete
+        con.execute("DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)")
 
-        # 6) Cleanup temp tables
         con.execute("DROP TABLE IF EXISTS touched_termids")
         con.execute("DROP TABLE IF EXISTS del_docids")
-
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
@@ -372,24 +248,15 @@ def delete_N_rand(con, N):
 def insert(con, doc, docid=None):
     """
     Insert a new document. 
-    
-    Guardrail:
-    - If docid is None: Auto-increments.
-    - If docid is Provided: It MUST NOT exist in the index yet.
-      (This ensures updates only happen via modify(), which cleans up first).
     """
-
-    # --- Guardrail: Prevent accidental corruption ---
     if docid is not None:
-        # Check if this ID is already in use
         exists = con.execute(
             "SELECT 1 FROM my_ducklake.docs WHERE docid = ?", [docid]
         ).fetchone()
         
         if exists:
             raise ValueError(
-                f"DocID {docid} already exists. You cannot overwrite it directly using insert(). "
-                f"Please use modify(con, {docid}, content) instead, which handles cleanup safely."
+                f"DocID {docid} already exists. Please use modify() for updates."
             )
 
     con.execute("BEGIN")
@@ -399,7 +266,6 @@ def insert(con, doc, docid=None):
         con.execute("INSERT INTO input_stage VALUES (?, ?)", [docid, doc])
 
         # 2. Resolve DocID and Length
-        #    Logic: If input docid is NULL, calculate MAX+1.
         con.execute("""
             CREATE TEMP TABLE target_doc AS
             SELECT 
@@ -422,7 +288,6 @@ def insert(con, doc, docid=None):
         """)
 
         # 4. Upsert Dictionary (merging with current index)
-        #    We are adding counts to existing words or creating new ones.
         con.execute("""
             WITH base AS (SELECT COALESCE(MAX(termid), 0) AS max_id FROM my_ducklake.dict),
             annotated AS (
@@ -472,7 +337,6 @@ def insert(con, doc, docid=None):
         # 8. Retrieve final docid
         final_docid = con.execute("SELECT docid FROM target_doc").fetchone()[0]
 
-        # Cleanup
         con.execute("DROP TABLE input_stage")
         con.execute("DROP TABLE target_doc")
         con.execute("DROP TABLE doc_terms")
@@ -487,9 +351,6 @@ def insert(con, doc, docid=None):
 def modify(con, docid, content):
     """
     Replace content for an existing docid by delete+insert in one transaction.
-
-    Returns:
-      - docid of the updated document (same as input).
     """
     con.execute("BEGIN")
     try:
