@@ -10,9 +10,9 @@ parquet/
 # macOS
 .DS_Store
 
-results/performance_plots/
-results/performance_results/
-results/query_terms/
+results/
 
 **/__pycache__/
 *.pyc
+
+.vscode/
