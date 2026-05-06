@@ -107,6 +107,15 @@ python code/dynamic_index.py reset
 
 ```
 
+### Upgrading the DuckLake Extension
+
+If the DuckLake extension is upgraded to a new major version, the existing catalog may be incompatible with the new extension (e.g. `catalog version is 0.3, but the extension requires version 1.0`). Since the catalog is fully derived from the source Parquet files, the simplest fix is a reset and re-initialization — no data is lost:
+
+```bash
+python code/dynamic_index.py reset
+python code/dynamic_index.py initialise --parquet "*"
+```
+
 ## Performance Testing
 
 The system includes a testing harness designed to measure the impact of the "Merge-on-Read" strategy on query latency.

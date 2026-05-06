@@ -2,13 +2,54 @@
 # Build/replace BM25 index artifacts (dict/docs/postings) directly in DuckDB.
 # Also supports point updates.
 
+import time
+import duckdb
+
 # ---------------------------------------------------------------------
 # Public: Full Rebuild
 # ---------------------------------------------------------------------
-def reindex(con):
+def reindex(con, max_retries=5):
     """
     Rebuild index tables (dict, docs, postings) directly from my_ducklake.data
     using vectorized SQL.
+
+    Retries up to max_retries times on DuckLake 1.0 IOException.
+    Root cause: DuckLake 1.0 pre-registers parquet file UUIDs in the metadata
+    catalog before the physical file is written to disk. Any write operation
+    (CREATE TABLE AS or INSERT INTO) can hit a race condition where the engine
+    tries to open a file that has been registered but not yet flushed. A brief
+    pause + retry clears the condition.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            _reindex_impl(con)
+            return
+        except duckdb.IOException as e:
+            if "Cannot open file" not in str(e) or attempt == max_retries:
+                raise
+            print(f"  [reindex attempt {attempt}/{max_retries}] "
+                  f"DuckLake file-sync race condition — cleaning up and retrying in {attempt}s...")
+            _drop_index_tables(con)
+            time.sleep(attempt)  # progressive back-off: 1 s, 2 s, 3 s …
+
+
+def _drop_index_tables(con):
+    """Drop partially-built index tables so a retry starts from a clean state."""
+    for obj in ("VIEW v_token_stream", "TABLE postings", "TABLE docs", "TABLE dict"):
+        try:
+            con.execute(f"DROP {obj} IF EXISTS")
+        except Exception:
+            pass
+    try:
+        con.execute("CHECKPOINT")
+    except Exception:
+        pass
+
+
+def _reindex_impl(con):
+    """
+    Single attempt at a full index rebuild. Called by reindex(); not intended
+    for direct use.
     """
     con.execute("USE my_ducklake")
     
@@ -27,42 +68,74 @@ def reindex(con):
 
     # 2. Build Dictionary Table
     # Uses row_number() for deterministic IDs (sorted by term)
+    # FIX (DuckLake 1.0): Split CREATE TABLE (DDL) from INSERT (DML) to prevent
+    # DuckLake from pre-registering a parquet UUID in the catalog before the
+    # physical file exists, which causes a non-deterministic IOException on read-back.
     print("Building table -> my_ducklake.dict ...")
+    con.execute("DROP TABLE IF EXISTS dict")
     con.execute("""
-        CREATE OR REPLACE TABLE dict AS
-        SELECT 
-            row_number() OVER (ORDER BY term) AS termid, 
-            term, 
+        CREATE TABLE dict (
+            termid BIGINT,
+            term   VARCHAR,
+            df     BIGINT
+        )
+    """)
+    con.execute("CHECKPOINT")
+    con.execute("""
+        INSERT INTO dict
+        SELECT
+            row_number() OVER (ORDER BY term) AS termid,
+            term,
             COUNT(DISTINCT docid) AS df
         FROM v_token_stream
         GROUP BY term
     """)
+    con.execute("CHECKPOINT")
 
     # 3. Build Docs Index Table
     # Calculates length directly from data to capture documents with 0 tokens safely
     print("Building table -> my_ducklake.docs ...")
+    con.execute("DROP TABLE IF EXISTS docs")
     con.execute("""
-        CREATE OR REPLACE TABLE docs AS
-        SELECT 
-            docid, 
+        CREATE TABLE docs (
+            docid BIGINT,
+            len   BIGINT
+        )
+    """)
+    con.execute("CHECKPOINT")
+    con.execute("""
+        INSERT INTO docs
+        SELECT
+            docid,
             len(regexp_extract_all(lower(content), '[a-z]+')) AS len
         FROM my_ducklake.data
     """)
+    con.execute("CHECKPOINT")
 
     # 4. Build Postings Table
     # Joins the token stream with the Dictionary we just created
     print("Building table -> my_ducklake.postings ...")
+    con.execute("DROP TABLE IF EXISTS postings")
     con.execute("""
-        CREATE OR REPLACE TABLE postings AS
-        SELECT 
-            d.termid, 
-            t.docid, 
+        CREATE TABLE postings (
+            termid BIGINT,
+            docid  BIGINT,
+            tf     BIGINT
+        )
+    """)
+    con.execute("CHECKPOINT")
+    con.execute("""
+        INSERT INTO postings
+        SELECT
+            d.termid,
+            t.docid,
             COUNT(*) AS tf
         FROM v_token_stream t
         JOIN my_ducklake.dict d ON t.term = d.term
         GROUP BY d.termid, t.docid
     """)
-    
+    con.execute("CHECKPOINT")
+
     # Cleanup view
     con.execute("DROP VIEW IF EXISTS v_token_stream")
     

@@ -19,9 +19,15 @@ PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 # ---------------------------------------------------------------------
 # DuckLake Attachment
 # ---------------------------------------------------------------------
-def connect_ducklake(con):
+def connect_ducklake(con, auto_migrate=False):
     """
     Attach (or create) the DuckLake catalog as `my_ducklake`.
+
+    Args:
+        auto_migrate: If True, passes AUTOMATIC_MIGRATION TRUE to the ATTACH
+                      statement. Use this once when upgrading the catalog to a
+                      new DuckLake extension version (e.g. 0.3 → 1.0).
+                      After migration succeeds, set back to False (the default).
     """
     DUCKLAKE_DATA.mkdir(parents=True, exist_ok=True)
 
@@ -32,8 +38,10 @@ def connect_ducklake(con):
     data_path = DUCKLAKE_DATA.as_posix()
 
     # ATTACH creates or opens the DuckLake catalog
+    migration_opt = ", AUTOMATIC_MIGRATION TRUE" if auto_migrate else ""
     con.execute(
-        f"ATTACH 'ducklake:{metadata_path}' AS my_ducklake (DATA_PATH '{data_path}');"
+        f"ATTACH 'ducklake:{metadata_path}' AS my_ducklake "
+        f"(DATA_PATH '{data_path}'{migration_opt});"
     )
     con.execute("USE my_ducklake;")
 
@@ -157,6 +165,9 @@ def initialise_data(con, parquet="*", limit=None):
         params.append(int(limit))
 
     con.execute(sql, params)
+    # Flush to physical parquet files immediately so reindex can read from
+    # my_ducklake.data without hitting DuckLake 1.0 data-inlining file errors.
+    con.execute("CHECKPOINT")
 
 # ---------------------------------------------------------------------
 # Incremental Import / Upsert
