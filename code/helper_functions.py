@@ -211,6 +211,8 @@ def checkpoint_rewrite(con):
     print(f"--- CHECKPOINT triggered ---")
     start_ckpt = time.perf_counter()
     con.execute("""
+                -- delete_threshold => 0.01 instructs DuckLake to rewrite only data files
+                -- where more than 1% of rows have been marked as deleted
                 CALL ducklake_rewrite_data_files('my_ducklake', delete_threshold => 0.01);
                 CHECKPOINT;
                 """)

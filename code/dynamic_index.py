@@ -480,7 +480,7 @@ def load_plot_data(csv_file, col_name):
     """Reads CSV and returns sorted arrays of (x_percent_deleted, y_runtime)."""
     x_vals = []
     y_vals = []
-    
+
     try:
         with open(csv_file, newline="", encoding="utf-8") as f:
             r = csv.DictReader(f)
@@ -505,11 +505,44 @@ def load_plot_data(csv_file, col_name):
     return None, None
 
 
-def run_plot_comparison(csv_files, qtype, top_n, out_raw, out_imp, show=False):
+def load_cumulative_data(csv_file, col_name):
     """
-    Generates two plots:
+    Reads CSV and returns sorted arrays of (x_percent_deleted, y_cumulative_time).
+    Cumulative time is the running total of (avg_query_time * query_count) at each
+    deletion step, representing the total wall-clock query cost paid over the index
+    lifetime up to that point.
+    """
+    rows = []
+    try:
+        with open(csv_file, newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                try:
+                    pct_orig   = float(row["percent_of_original"])
+                    avg_rt     = float(row[col_name])
+                    query_cnt  = float(row["query_count"])
+                    rows.append((100.0 - pct_orig, avg_rt * query_cnt))
+                except (KeyError, ValueError):
+                    continue
+    except Exception as e:
+        print(f"[ERROR] Could not read {csv_file}: {e}")
+        return None, None
+
+    if not rows:
+        return None, None
+
+    rows.sort(key=lambda r: r[0])
+    x_vals = np.array([r[0] for r in rows])
+    y_vals = np.cumsum([r[1] for r in rows])
+    return x_vals, y_vals
+
+
+def run_plot_comparison(csv_files, qtype, top_n, out_raw, show=False,
+                        cumulative=False, out_cum="combined_cumulative.png"):
+    """
+    Generates up to two plots:
     1. Raw Query Times vs Deletion %
-    2. Performance Improvement vs Baseline (requires 'checkpoint0' in one filename)
+    2. Cumulative total query cost over index lifetime (opt-in via --cumulative)
     """
     col_name = f"avg_bm25_sql_time_s_{qtype}_top{top_n}"
     
@@ -544,7 +577,6 @@ def run_plot_comparison(csv_files, qtype, top_n, out_raw, out_imp, show=False):
 
     # Resolve output paths
     out_raw_path = PERF_PLOTS_DIR / out_raw
-    out_imp_path = PERF_PLOTS_DIR / out_imp
 
     # --- PLOT 1: Raw Times ---
     plt.figure(figsize=(10, 6))
@@ -560,38 +592,23 @@ def run_plot_comparison(csv_files, qtype, top_n, out_raw, out_imp, show=False):
     plt.savefig(out_raw_path, dpi=150)
     print(f"Saved raw plot to: {out_raw_path}")
 
-    # --- PLOT 2: Improvement (requires 'checkpoint0') ---
-    baseline_key = next((k for k in datasets if "checkpoint0" in k.lower()), None)
-    
-    if baseline_key:
-        print(f"Using baseline: {baseline_key}")
-        base_x, base_y = datasets[baseline_key]
-
+    # --- PLOT 3: Cumulative total query cost (opt-in) ---
+    if cumulative:
+        out_cum_path = PERF_PLOTS_DIR / out_cum
         plt.figure(figsize=(10, 6))
-        plt.axhline(0, color='black', linewidth=1, linestyle='--')
-
-        for label, (curr_x, curr_y) in datasets.items():
-            if label == baseline_key:
-                continue
-
-            # Interpolate to match baseline X coordinates
-            interp_y = np.interp(base_x, curr_x, curr_y)
-            pct_improvement = ((base_y - interp_y) / base_y) * 100
-            avg_imp = np.mean(pct_improvement)
-
-            plt.plot(base_x, pct_improvement, marker=".", markersize=3, 
-                     label=f"{label} (Avg Imp: {avg_imp:.1f}%)")
-
+        for f in resolved_files:
+            label = parse_label(f)
+            x, y = load_cumulative_data(f, col_name)
+            if x is not None:
+                plt.plot(x, y, label=label, linewidth=1.8)
         plt.xlabel("% of index deleted")
-        plt.ylabel("% Performance Improvement vs Baseline")
-        plt.title(f"Performance Increase Relative to {baseline_key}")
-        plt.grid(True)
+        plt.ylabel("Cumulative total query time (s)")
+        plt.title(f"Cumulative BM25 query cost over index lifetime ({qtype})")
+        plt.grid(True, alpha=0.3)
         plt.legend(title="Strategy")
         plt.tight_layout()
-        plt.savefig(out_imp_path, dpi=150)
-        print(f"Saved improvement plot to: {out_imp_path}")
-    else:
-        print("[INFO] No 'checkpoint0' baseline found. Skipping improvement plot.")
+        plt.savefig(out_cum_path, dpi=150)
+        print(f"Saved cumulative plot to: {out_cum_path}")
 
     if show:
         plt.show()
@@ -658,7 +675,8 @@ if __name__ == "__main__":
     p_plot.add_argument("--qtype", default="disjunctive")
     p_plot.add_argument("--top", dest="top_n", type=int, default=10)
     p_plot.add_argument("--out-raw", default="combined_times.png", help="Output filename for raw plot")
-    p_plot.add_argument("--out-imp", default="combined_improvement.png", help="Output filename for improvement plot")
+    p_plot.add_argument("--cumulative", action="store_true", help="Also generate a cumulative total query cost plot")
+    p_plot.add_argument("--out-cum", default="combined_cumulative.png", help="Output filename for cumulative plot")
     p_plot.add_argument("--show", action="store_true")
 
     args = parser.parse_args()
@@ -683,4 +701,5 @@ if __name__ == "__main__":
     elif args.mode == "perf-test":
         run_performance_test(args)
     elif args.mode == "plot-comparison":
-        run_plot_comparison(args.csv_files, args.qtype, args.top_n, args.out_raw, args.out_imp, args.show)
+        run_plot_comparison(args.csv_files, args.qtype, args.top_n, args.out_raw, args.show,
+                            cumulative=args.cumulative, out_cum=args.out_cum)

@@ -142,14 +142,34 @@ python code/dynamic_index.py perf-test \
 
 ### Comparative Analysis
 
-Generate plots to compare the performance profiles of different maintenance strategies (e.g., comparing runs with different checkpoint intervals).
+Generate plots to compare the performance profiles of different maintenance strategies (e.g., comparing runs with different checkpoint intervals). By default this produces a raw query times plot. Pass `--cumulative` to also generate a cumulative total query cost plot, which shows the aggregate query time paid over the full index lifetime.
 
 ```bash
+# Raw query times comparison
 python code/dynamic_index.py plot-comparison \
     results/performance_results/run1.csv \
-    results/performance_results/run2.csv
+    results/performance_results/run2.csv \
+    --out-raw combined_results.png
+
+# Include cumulative cost plot
+python code/dynamic_index.py plot-comparison \
+    results/performance_results/run1.csv \
+    results/performance_results/run2.csv \
+    --cumulative \
+    --out-raw combined_results.png \
+    --out-cum combined_cumulative.png
 
 ```
+
+**Arguments:**
+
+* `--out-raw`: Output filename for the raw query times plot (default: `combined_times.png`).
+* `--cumulative`: Also generate a cumulative total query cost plot.
+* `--out-cum`: Output filename for the cumulative plot (default: `combined_cumulative.png`).
+* `--qtype`: Query type to plot — `disjunctive` (default) or `conjunctive`.
+* `--top`: Number of results per query used during the test run (default: `10`).
+
+All plots are saved to `results/performance_plots/`.
 
 ## Architecture Notes
 
