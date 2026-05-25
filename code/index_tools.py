@@ -93,7 +93,7 @@ def _reindex_impl(con):
     con.execute("CHECKPOINT")
 
     # 3. Build Docs Index Table
-    # Calculates length directly from data to capture documents with 0 tokens safely
+    # Uses v_token_stream to avoid parsing content twice
     print("Building table -> my_ducklake.docs ...")
     con.execute("DROP TABLE IF EXISTS docs")
     con.execute("""
@@ -107,8 +107,9 @@ def _reindex_impl(con):
         INSERT INTO docs
         SELECT
             docid,
-            len(regexp_extract_all(lower(content), '[a-z]+')) AS len
-        FROM my_ducklake.data
+            COUNT(*) AS len
+        FROM v_token_stream
+        GROUP BY docid
     """)
     con.execute("CHECKPOINT")
 
