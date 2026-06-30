@@ -348,7 +348,7 @@ The three layers are:
 
 1. **Invariants** — internal consistency of the live index (`dict.df` equals the real
    document frequency, `docs.len` equals the summed term frequencies, no orphan
-   postings, and `data`/`docs` row counts agree).
+   postings, and every indexed document exists in the source data).
 2. **Behaviour** — a full `insert → modify → delete` cycle, asserting the index
    reacts correctly at each step, then cleans up after itself.
 3. **Parity** — the strongest test: snapshot the index, run a full `reindex` (the
@@ -359,4 +359,3 @@ The three layers are:
 ## License
 
 This project is released under the MIT License. See [LICENSE](LICENSE) for details.
-```
