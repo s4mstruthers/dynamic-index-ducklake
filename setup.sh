@@ -38,17 +38,16 @@ fi
 
 # --- Install required packages ---
 echo "Installing dependencies..."
-# Using --no-update-deps to speed up if already installed
 conda run -n "$ENV_NAME" conda install -y -c conda-forge \
-  "duckdb>=1.4.1" numpy pyarrow matplotlib pandas
+  "duckdb>=1.4.1" numpy matplotlib pandas
 
 # --- Verify installation ---
 echo "Verifying package installation..."
 conda run --no-capture-output -n "$ENV_NAME" python - <<'EOF'
-import duckdb, numpy, pyarrow, pandas, matplotlib
+import duckdb, numpy, pandas, matplotlib
 print(f"duckdb: {duckdb.__version__}")
 assert tuple(int(x) for x in duckdb.__version__.split('.')[:3]) >= (1,4,1)
-print("All required packages (duckdb, numpy, pyarrow, pandas, matplotlib) imported successfully.")
+print("All required packages (duckdb, numpy, pandas, matplotlib) imported successfully.")
 EOF
 
 # --- Create COMPLETE Project Directory Structure ---
@@ -58,7 +57,9 @@ echo "Creating project directories..."
 mkdir -p "ducklake/data_files"
 
 # 2. Parquet artifacts
-# backup_parquets is required for the 'reset' command in dynamic_index.py
+#   webcrawl_data/   : raw source Parquet files (input corpus)
+#   index/           : optional pre-built index artifacts
+#   backup_parquets/ : manual backups of source data
 mkdir -p "parquet/index"
 mkdir -p "parquet/webcrawl_data"
 mkdir -p "parquet/backup_parquets"

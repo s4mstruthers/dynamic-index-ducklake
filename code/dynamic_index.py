@@ -16,6 +16,8 @@ Modes:
   - initialise      : Rebuild data table from parquet and full reindex.
   - reindex         : Rebuild index artifacts from current data.
   - delete          : Delete a specific document ID.
+  - insert          : Insert a new document into the index.
+  - modify          : Replace the content of an existing document.
   - checkpoint      : Manually trigger a DuckLake checkpoint and rewrite.
   - reset           : Hard reset: delete DB files (keeps source parquets).
   - perf-test       : Run the performance testing loop (generate queries -> measure -> delete -> repeat).
@@ -29,8 +31,6 @@ import io
 import os
 import re
 import shutil
-import sys
-import time
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +43,6 @@ import numpy as np
 # Internal Project Modules
 from helper_functions import (
     BASE_DIR,
-    PARQUET_FOLDER,
     DUCKLAKE_FOLDER,
     connect_ducklake,
     test_ducklake,
@@ -53,7 +52,7 @@ from helper_functions import (
     checkpoint_rewrite
 )
 from fts_tools import run_bm25_query
-from index_tools import reindex, delete, delete_N, delete_N_rand
+from index_tools import reindex, delete, delete_N, insert, modify
 
 # ---------------------------------------------------------------------
 # Configuration & Constants
@@ -84,7 +83,7 @@ def run_hard_reset():
     Performs a 'hard reset' of the DuckLake environment.
     1. Deletes DuckLake metadata file.
     2. Deletes DuckLake data_files directory.
-    
+
     NOTE: This DOES NOT touch the source parquet files in 'webcrawl_data'.
     """
     print("--- INITIATING HARD RESET (DB ONLY) ---")
@@ -172,6 +171,26 @@ def run_delete(docid):
     print(f"Deleted docid={docid} from my_ducklake.")
 
 
+def run_insert(content, docid=None):
+    """
+    Insert a new document and update the index in place.
+    If docid is None, the next available id is assigned automatically.
+    """
+    con = duckdb.connect()
+    connect_ducklake(con)
+    new_id = insert(con, content, docid=docid)
+    print(f"Inserted document as docid={new_id}.")
+    return new_id
+
+
+def run_modify(docid, content):
+    """Replace the content of an existing document (delete + re-insert in one transaction)."""
+    con = duckdb.connect()
+    connect_ducklake(con)
+    modify(con, docid, content)
+    print(f"Modified docid={docid}.")
+
+
 def run_checkpoint():
     """
     Standalone checkpoint mode.
@@ -185,7 +204,7 @@ def run_checkpoint():
 
 
 # ---------------------------------------------------------------------
-# Performance Testing Logic (Merged from performance_testing.py)
+# Performance Testing Logic
 # ---------------------------------------------------------------------
 
 def get_latest_query_file(pattern="queries_random_*.csv"):
@@ -203,13 +222,13 @@ def load_queries_from_csv(filepath):
     queries = []
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Query file not found: {filepath}")
-        
+
     with open(filepath, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         header = next(reader, None)
         # Check header
         if header and header[0] == "query":
-            pass 
+            pass
         elif header:
             queries.append(header[0])
 
@@ -308,7 +327,7 @@ def plot_single_result(results_csv, qtype, top_n, output_png=None, random=False,
     plt.plot(x_pct_deleted, y_avg_runtime, marker="o")
     plt.xlabel("% of index deleted")
     plt.ylabel(f"Avg BM25 SQL time (s) [{qtype}, top={top_n}]")
-    
+
     title_suffix = "randomly deleted" if random else "sequentially deleted"
     plt.title(f"Avg Query Time vs % Index ({title_suffix})")
 
@@ -316,7 +335,7 @@ def plot_single_result(results_csv, qtype, top_n, output_png=None, random=False,
     plt.tight_layout()
     plt.savefig(output_png, dpi=150)
     print(f"Saved plot to: {output_png}")
-    
+
     if show:
         plt.show()
     plt.close()
@@ -339,9 +358,9 @@ def run_performance_test(args):
 
     con = duckdb.connect()
     connect_ducklake(con)
-    
+
     print("--- STARTING PERFORMANCE TEST ---")
-    
+
     # 1. Ensure Data Exists
     # If we just reset, the data table is gone. We must re-initialise from existing parquets.
     if args.reset:
@@ -360,7 +379,7 @@ def run_performance_test(args):
         raise SystemExit("ERROR: Index empty. Populate my_ducklake.data first (or use --reset).")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+
     # 2. Setup Query Source
     queries = []
     queries_csv_used = ""
@@ -373,7 +392,7 @@ def run_performance_test(args):
                 target_file = latest
             else:
                 raise SystemExit("ERROR: --reuse-latest specified but no query files found.")
-        
+
         if not target_file:
             raise SystemExit("ERROR: --reuse-file specified but no filename provided.")
 
@@ -405,7 +424,7 @@ def run_performance_test(args):
         results_filename = f"{base_name}.csv"
 
     results_csv_path = PERF_RESULTS_DIR / results_filename
-    
+
     with open(results_csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
@@ -426,7 +445,7 @@ def run_performance_test(args):
         iteration += 1
         pct_orig = docs_remaining / original_count * 100.0
         pct_deleted = 100.0 - pct_orig
-        
+
         print(f"ITER {iteration} | {pct_deleted:.2f}% deleted | Docs: {docs_remaining}")
 
         # Measure
@@ -443,21 +462,18 @@ def run_performance_test(args):
                 len(queries),
                 args.delete_batch,
             ])
-        
+
         # Delete
-        if args.random:
-            delete_N_rand(con, args.delete_batch)
-        else:
-            delete_N(con, args.delete_batch)
-            
+        delete_N(con, args.delete_batch, random=args.random)
+
         # Checkpoint?
         if args.checkpoint_pct > 0 and pct_deleted >= next_checkpoint_pct:
-            checkpoint_rewrite(con) 
+            checkpoint_rewrite(con)
             next_checkpoint_pct += args.checkpoint_pct
-        
+
         docs_remaining = get_docid_count(con)
 
-    print(f"--- TEST COMPLETE ---")
+    print("--- TEST COMPLETE ---")
     print(f"Results saved to: {results_csv_path}")
 
     # 5. Plot
@@ -465,7 +481,7 @@ def run_performance_test(args):
         plot_single_result(results_csv_path, args.qtype, args.top_n, output_png=args.plot_file, random=args.random)
 
 # ---------------------------------------------------------------------
-# Plotting Comparison Logic (Merged from plot_multiple_results.py)
+# Plotting Comparison Logic
 # ---------------------------------------------------------------------
 
 def parse_label(filename):
@@ -545,7 +561,7 @@ def run_plot_comparison(csv_files, qtype, top_n, out_raw, show=False,
     2. Cumulative total query cost over index lifetime (opt-in via --cumulative)
     """
     col_name = f"avg_bm25_sql_time_s_{qtype}_top{top_n}"
-    
+
     # Prepend PERF_RESULTS_DIR if path is just a filename
     resolved_files = []
     for f in csv_files:
@@ -620,14 +636,14 @@ def run_plot_comparison(csv_files, qtype, top_n, out_raw, show=False,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DuckLake Dynamic Index Tooling")
-    
+
     subparsers = parser.add_subparsers(dest="mode", required=True, help="Operation Mode")
 
     # --- Core Modes ---
     subparsers.add_parser("sanity", help="Inspect DuckLake schema/data")
     subparsers.add_parser("reindex", help="Rebuild index from data")
     subparsers.add_parser("checkpoint", help="Manually trigger DuckLake checkpoint rewrite")
-    
+
     # Reset
     subparsers.add_parser("reset", help="Hard Reset: Wipe DB files only (source parquets preserved)")
 
@@ -643,12 +659,25 @@ if __name__ == "__main__":
     p_import.add_argument("--parquet", type=str, required=True)
 
     p_init = subparsers.add_parser("initialise", help="Rebuild data from Parquet + Reindex")
-    p_init.add_argument("--parquet", type=str, default="*", help="Parquet file(s) relative to webcrawl_data")
+    p_init.add_argument("--parquet", type=str, default="*", help="Parquet file(s) resolved relative to the parquet/ folder")
     p_init.add_argument("--limit", type=int, default=None)
 
     # Delete
     p_del = subparsers.add_parser("delete", help="Delete a specific document")
     p_del.add_argument("--docid", type=int, required=True)
+
+    # Insert
+    p_ins = subparsers.add_parser("insert", help="Insert a new document into the index")
+    p_ins.add_argument("--content", "--text", dest="content", required=True, type=str,
+                       help="Document text to index")
+    p_ins.add_argument("--docid", type=int, default=None,
+                       help="Optional explicit docid (auto-assigned if omitted)")
+
+    # Modify
+    p_mod = subparsers.add_parser("modify", help="Replace the content of an existing document")
+    p_mod.add_argument("--docid", type=int, required=True, help="ID of the document to modify")
+    p_mod.add_argument("--content", "--text", dest="content", required=True, type=str,
+                       help="New document text")
 
     # --- Performance Testing Mode ---
     p_perf = subparsers.add_parser("perf-test", help="Run performance testing loop")
@@ -659,10 +688,10 @@ if __name__ == "__main__":
     p_perf.add_argument("--random", action="store_true", help="Randomize delete order")
     p_perf.add_argument("--checkpoint-pct", type=float, default=0.0, help="Checkpoint every N%% deleted")
     p_perf.add_argument("--reset", action="store_true", help="Run Hard Reset (DB Wipe) before starting test")
-    
+
     p_perf.add_argument("--plot", action="store_true", help="Plot result immediately after test")
     p_perf.add_argument("--plot-file", type=str, help="Custom filename for the single run plot")
-    
+
     # File handling for perf test
     p_perf.add_argument("--results-csv", type=str, help="Output CSV filename (saved in results/performance_results/)")
     p_perf.add_argument("--queries-csv", type=str, help="Output queries filename (saved in results/query_terms/)")
@@ -698,6 +727,10 @@ if __name__ == "__main__":
         run_reindex()
     elif args.mode == "delete":
         run_delete(args.docid)
+    elif args.mode == "insert":
+        run_insert(args.content, args.docid)
+    elif args.mode == "modify":
+        run_modify(args.docid, args.content)
     elif args.mode == "perf-test":
         run_performance_test(args)
     elif args.mode == "plot-comparison":

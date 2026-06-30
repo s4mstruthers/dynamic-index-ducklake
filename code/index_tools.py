@@ -52,25 +52,27 @@ def _reindex_impl(con):
     for direct use.
     """
     con.execute("USE my_ducklake")
-    
-    # REMOVED: con.execute("BEGIN") to prevent IO/visibility race conditions
-    # with the ducklake extension during file creation.
+
+    # Intentionally NOT wrapped in BEGIN/COMMIT: an explicit transaction around
+    # these statements triggers IO/visibility race conditions with the ducklake
+    # extension during file creation (see the retry logic in reindex()).
 
     # 1. Create a transient view of all tokens (matching Python's regex [a-z]+)
     # We use regexp_extract_all to get a list, then UNNEST to explode it into rows.
     con.execute("""
-        CREATE OR REPLACE TEMP VIEW v_token_stream AS 
-        SELECT 
-            docid, 
+        CREATE OR REPLACE TEMP VIEW v_token_stream AS
+        SELECT
+            docid,
             UNNEST(regexp_extract_all(lower(content), '[a-z]+')) AS term
         FROM my_ducklake.data
     """)
 
     # 2. Build Dictionary Table
-    # Uses row_number() for deterministic IDs (sorted by term)
-    # FIX (DuckLake 1.0): Split CREATE TABLE (DDL) from INSERT (DML) to prevent
-    # DuckLake from pre-registering a parquet UUID in the catalog before the
-    # physical file exists, which causes a non-deterministic IOException on read-back.
+    # Uses row_number() for deterministic IDs (sorted by term).
+    # DuckLake 1.0 note: CREATE TABLE (DDL) is kept separate from INSERT (DML) to
+    # prevent DuckLake from pre-registering a parquet UUID in the catalog before
+    # the physical file exists, which causes a non-deterministic IOException on
+    # read-back.
     print("Building table -> my_ducklake.dict ...")
     con.execute("DROP TABLE IF EXISTS dict")
     con.execute("""
@@ -139,8 +141,6 @@ def _reindex_impl(con):
 
     # Cleanup view
     con.execute("DROP VIEW IF EXISTS v_token_stream")
-    
-    # REMOVED: con.execute("COMMIT")
 
 # ---------------------------------------------------------------------
 # Point updates (delete/insert/modify)
@@ -151,59 +151,75 @@ def delete(con, docid):
     """
     con.execute("BEGIN")
     try:
-        con.execute("DROP TABLE IF EXISTS touched_termids")
-        con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT)")
-
-        con.execute(
-            "INSERT INTO touched_termids "
-            "SELECT DISTINCT termid FROM my_ducklake.postings WHERE docid = ?",
-            [docid],
-        )
-
-        con.execute(
-            """
-            UPDATE my_ducklake.dict
-            SET df = CASE WHEN df > 0 THEN df - 1 ELSE 0 END
-            WHERE termid IN (SELECT termid FROM touched_termids)
-            """
-        )
-
-        con.execute(
-            """
-            DELETE FROM my_ducklake.dict
-            WHERE df = 0
-              AND termid IN (SELECT termid FROM touched_termids)
-            """
-        )
-
-        con.execute("DELETE FROM my_ducklake.postings WHERE docid = ?", [docid])
-        con.execute("DELETE FROM my_ducklake.docs      WHERE docid = ?", [docid])
-        con.execute("DELETE FROM my_ducklake.data      WHERE docid = ?", [docid])
-
-        con.execute("DROP TABLE IF EXISTS touched_termids")
+        _delete_body(con, docid)
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
 
-def delete_N(con, N):
+
+def _delete_body(con, docid):
     """
-    Delete N docs in one transaction and repair index structures in bulk.
+    Transaction-free core of delete(). The caller is responsible for the
+    surrounding BEGIN/COMMIT so this can be reused inside modify() without
+    nesting transactions.
     """
+    con.execute("DROP TABLE IF EXISTS touched_termids")
+    con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT)")
+
+    con.execute(
+        "INSERT INTO touched_termids "
+        "SELECT DISTINCT termid FROM my_ducklake.postings WHERE docid = ?",
+        [docid],
+    )
+
+    con.execute(
+        """
+        UPDATE my_ducklake.dict
+        SET df = CASE WHEN df > 0 THEN df - 1 ELSE 0 END
+        WHERE termid IN (SELECT termid FROM touched_termids)
+        """
+    )
+
+    con.execute(
+        """
+        DELETE FROM my_ducklake.dict
+        WHERE df = 0
+          AND termid IN (SELECT termid FROM touched_termids)
+        """
+    )
+
+    con.execute("DELETE FROM my_ducklake.postings WHERE docid = ?", [docid])
+    con.execute("DELETE FROM my_ducklake.docs      WHERE docid = ?", [docid])
+    con.execute("DELETE FROM my_ducklake.data      WHERE docid = ?", [docid])
+
+    con.execute("DROP TABLE IF EXISTS touched_termids")
+
+def delete_N(con, N, random=False):
+    """
+    Delete N documents in one transaction and repair the index structures in bulk.
+
+    Args:
+        N: Number of documents to delete.
+        random: If True, delete a random sample of N documents; otherwise delete
+                the first N by docid order. Random deletion is used by the
+                performance harness to avoid bias from sequential docid layout.
+    """
+    selection = (
+        "SELECT docid FROM my_ducklake.docs ORDER BY RANDOM() LIMIT ?" if random
+        else "SELECT docid FROM my_ducklake.docs LIMIT ?"
+    )
+
     con.execute("BEGIN")
     try:
         con.execute("DROP TABLE IF EXISTS del_docids")
         con.execute("DROP TABLE IF EXISTS touched_termids")
 
-        # Choose N docids
+        # Choose the docids to delete
         con.execute("CREATE TEMP TABLE del_docids(docid BIGINT)")
-        con.execute(
-            "INSERT INTO del_docids "
-            "SELECT docid FROM my_ducklake.docs LIMIT ?",
-            [N],
-        )
+        con.execute("INSERT INTO del_docids " + selection, [N])
 
-        # Compute touched termids
+        # Compute touched termids and how many of their docs are being removed
         con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT, cnt BIGINT)")
         con.execute(
             """
@@ -215,7 +231,7 @@ def delete_N(con, N):
             """
         )
 
-        # Decrement df
+        # Decrement df by the number of deleted docs per term
         con.execute(
             """
             UPDATE my_ducklake.dict AS d
@@ -228,7 +244,7 @@ def delete_N(con, N):
             """
         )
 
-        # Cleanup zero df terms
+        # Remove terms that no longer appear in any document
         con.execute(
             """
             DELETE FROM my_ducklake.dict
@@ -237,73 +253,10 @@ def delete_N(con, N):
             """
         )
 
-        # Bulk delete
+        # Bulk delete from the index and source tables
         con.execute("DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)")
-        con.execute("DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)")
-        con.execute("DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)")
-
-        con.execute("DROP TABLE IF EXISTS touched_termids")
-        con.execute("DROP TABLE IF EXISTS del_docids")
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
-
-def delete_N_rand(con, N):
-    """
-    Delete N *random* docs in one transaction and repair index structures in bulk.
-    """
-    con.execute("BEGIN")
-    try:
-        con.execute("DROP TABLE IF EXISTS del_docids")
-        con.execute("DROP TABLE IF EXISTS touched_termids")
-
-        # Choose N random docids
-        con.execute("CREATE TEMP TABLE del_docids(docid BIGINT)")
-        con.execute(
-            "INSERT INTO del_docids "
-            "SELECT docid FROM my_ducklake.docs ORDER BY RANDOM() LIMIT ?",
-            [N],
-        )
-
-        # Compute touched termids
-        con.execute("CREATE TEMP TABLE touched_termids(termid BIGINT, cnt BIGINT)")
-        con.execute(
-            """
-            INSERT INTO touched_termids
-            SELECT termid, COUNT(DISTINCT docid) AS cnt
-            FROM my_ducklake.postings
-            WHERE docid IN (SELECT docid FROM del_docids)
-            GROUP BY termid
-            """
-        )
-
-        # Decrement df
-        con.execute(
-            """
-            UPDATE my_ducklake.dict AS d
-            SET df = CASE
-                        WHEN d.df > t.cnt THEN d.df - t.cnt
-                        ELSE 0
-                     END
-            FROM touched_termids t
-            WHERE d.termid = t.termid
-            """
-        )
-
-        # Cleanup zero df terms
-        con.execute(
-            """
-            DELETE FROM my_ducklake.dict
-            WHERE df = 0
-              AND termid IN (SELECT termid FROM touched_termids)
-            """
-        )
-
-        # Bulk delete
-        con.execute("DELETE FROM my_ducklake.postings WHERE docid IN (SELECT docid FROM del_docids)")
-        con.execute("DELETE FROM my_ducklake.docs WHERE docid IN (SELECT docid FROM del_docids)")
-        con.execute("DELETE FROM my_ducklake.data WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.docs     WHERE docid IN (SELECT docid FROM del_docids)")
+        con.execute("DELETE FROM my_ducklake.data     WHERE docid IN (SELECT docid FROM del_docids)")
 
         con.execute("DROP TABLE IF EXISTS touched_termids")
         con.execute("DROP TABLE IF EXISTS del_docids")
@@ -314,115 +267,133 @@ def delete_N_rand(con, N):
 
 def insert(con, doc, docid=None):
     """
-    Insert a new document. 
+    Insert a new document and update the index in place.
+    Returns the docid assigned to the new document.
+    """
+    con.execute("BEGIN")
+    try:
+        final_docid = _insert_body(con, doc, docid)
+        con.execute("COMMIT")
+        return final_docid
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
+def _insert_body(con, doc, docid=None):
+    """
+    Transaction-free core of insert(). The caller manages BEGIN/COMMIT so this
+    can be reused inside modify() without nesting transactions.
     """
     if docid is not None:
         exists = con.execute(
             "SELECT 1 FROM my_ducklake.docs WHERE docid = ?", [docid]
         ).fetchone()
-        
+
         if exists:
             raise ValueError(
                 f"DocID {docid} already exists. Please use modify() for updates."
             )
 
-    con.execute("BEGIN")
-    try:
-        # 1. Stage the input
-        con.execute("CREATE TEMP TABLE input_stage(docid BIGINT, content TEXT)")
-        con.execute("INSERT INTO input_stage VALUES (?, ?)", [docid, doc])
+    # 1. Stage the input
+    con.execute("CREATE TEMP TABLE input_stage(docid BIGINT, content TEXT)")
+    con.execute("INSERT INTO input_stage VALUES (?, ?)", [docid, doc])
 
-        # 2. Resolve DocID and Length
-        con.execute("""
-            CREATE TEMP TABLE target_doc AS
-            SELECT 
-                COALESCE(i.docid, (SELECT COALESCE(MAX(d.docid), 0) + 1 FROM my_ducklake.docs d)) AS docid,
-                i.content,
-                len(regexp_extract_all(lower(i.content), '[a-z]+')) AS doc_len
-            FROM input_stage i
-        """)
+    # 2. Resolve DocID and Length
+    con.execute("""
+        CREATE TEMP TABLE target_doc AS
+        SELECT
+            COALESCE(i.docid, (SELECT COALESCE(MAX(d.docid), 0) + 1 FROM my_ducklake.docs d)) AS docid,
+            i.content,
+            len(regexp_extract_all(lower(i.content), '[a-z]+')) AS doc_len
+        FROM input_stage i
+    """)
 
-        # 3. Tokenize and count TF (Pure SQL)
-        con.execute("""
-            CREATE TEMP TABLE doc_terms AS
-            WITH raw_tokens AS (
-                SELECT UNNEST(regexp_extract_all(lower(content), '[a-z]+')) AS term
-                FROM input_stage
-            )
-            SELECT term, COUNT(*) AS tf
-            FROM raw_tokens
-            GROUP BY term
-        """)
+    # 3. Tokenize and count TF (Pure SQL)
+    con.execute("""
+        CREATE TEMP TABLE doc_terms AS
+        WITH raw_tokens AS (
+            SELECT UNNEST(regexp_extract_all(lower(content), '[a-z]+')) AS term
+            FROM input_stage
+        )
+        SELECT term, COUNT(*) AS tf
+        FROM raw_tokens
+        GROUP BY term
+    """)
 
-        # 4. Upsert Dictionary (merging with current index)
-        con.execute("""
-            WITH base AS (SELECT COALESCE(MAX(termid), 0) AS max_id FROM my_ducklake.dict),
-            annotated AS (
-                SELECT 
-                    dt.term,
-                    d.termid,
-                    ROW_NUMBER() OVER (PARTITION BY (d.termid IS NULL) ORDER BY dt.term) AS rn
-                FROM doc_terms dt
-                LEFT JOIN my_ducklake.dict d ON dt.term = d.term
-            ),
-            source AS (
-                SELECT
-                    term,
-                    COALESCE(termid, (SELECT max_id FROM base) + rn) AS final_termid
-                FROM annotated
-            )
-            MERGE INTO my_ducklake.dict AS tgt
-            USING source
-            ON (tgt.term = source.term)
-            WHEN MATCHED THEN 
-                UPDATE SET df = tgt.df + 1
-            WHEN NOT MATCHED THEN 
-                INSERT (termid, term, df) VALUES (source.final_termid, source.term, 1)
-        """)
-
-        # 5. Insert Docs
-        con.execute("""
-            INSERT INTO my_ducklake.docs (docid, len)
-            SELECT docid, doc_len FROM target_doc
-        """)
-
-        # 6. Insert Postings
-        con.execute("""
-            INSERT INTO my_ducklake.postings (termid, docid, tf)
-            SELECT d.termid, td.docid, dt.tf
+    # 4. Upsert Dictionary (merging with current index)
+    con.execute("""
+        WITH base AS (SELECT COALESCE(MAX(termid), 0) AS max_id FROM my_ducklake.dict),
+        annotated AS (
+            SELECT
+                dt.term,
+                d.termid,
+                ROW_NUMBER() OVER (PARTITION BY (d.termid IS NULL) ORDER BY dt.term) AS rn
             FROM doc_terms dt
-            JOIN target_doc td ON 1=1
-            JOIN my_ducklake.dict d ON dt.term = d.term
-        """)
+            LEFT JOIN my_ducklake.dict d ON dt.term = d.term
+        ),
+        source AS (
+            SELECT
+                term,
+                COALESCE(termid, (SELECT max_id FROM base) + rn) AS final_termid
+            FROM annotated
+        )
+        MERGE INTO my_ducklake.dict AS tgt
+        USING source
+        ON (tgt.term = source.term)
+        WHEN MATCHED THEN
+            UPDATE SET df = tgt.df + 1
+        WHEN NOT MATCHED THEN
+            INSERT (termid, term, df) VALUES (source.final_termid, source.term, 1)
+    """)
 
-        # 7. Insert Content
-        con.execute("""
-            INSERT INTO my_ducklake.data (docid, content)
-            SELECT docid, content FROM target_doc
-        """)
+    # 5. Insert Docs
+    # Only index documents that produced at least one token. This matches
+    # reindex(), which builds `docs` from the token stream and therefore omits
+    # token-less documents; the content is still stored in `data` below.
+    con.execute("""
+        INSERT INTO my_ducklake.docs (docid, len)
+        SELECT docid, doc_len FROM target_doc
+        WHERE doc_len > 0
+    """)
 
-        # 8. Retrieve final docid
-        final_docid = con.execute("SELECT docid FROM target_doc").fetchone()[0]
+    # 6. Insert Postings
+    con.execute("""
+        INSERT INTO my_ducklake.postings (termid, docid, tf)
+        SELECT d.termid, td.docid, dt.tf
+        FROM doc_terms dt
+        JOIN target_doc td ON 1=1
+        JOIN my_ducklake.dict d ON dt.term = d.term
+    """)
 
-        con.execute("DROP TABLE input_stage")
-        con.execute("DROP TABLE target_doc")
-        con.execute("DROP TABLE doc_terms")
+    # 7. Insert Content
+    con.execute("""
+        INSERT INTO my_ducklake.data (docid, content)
+        SELECT docid, content FROM target_doc
+    """)
 
-        con.execute("COMMIT")
-        return final_docid
+    # 8. Retrieve final docid
+    final_docid = con.execute("SELECT docid FROM target_doc").fetchone()[0]
 
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    con.execute("DROP TABLE input_stage")
+    con.execute("DROP TABLE target_doc")
+    con.execute("DROP TABLE doc_terms")
+
+    return final_docid
+
 
 def modify(con, docid, content):
     """
-    Replace content for an existing docid by delete+insert in one transaction.
+    Replace the content of an existing document.
+
+    Runs delete + insert within a SINGLE transaction by calling the
+    transaction-free bodies directly, so the operation is atomic and does not
+    nest BEGIN/COMMIT blocks.
     """
     con.execute("BEGIN")
     try:
-        delete(con, docid)
-        new_id = insert(con, content, docid=docid)
+        _delete_body(con, docid)
+        new_id = _insert_body(con, content, docid=docid)
         con.execute("COMMIT")
         return new_id
     except Exception:

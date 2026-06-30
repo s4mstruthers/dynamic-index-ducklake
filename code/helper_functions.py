@@ -2,7 +2,6 @@ from pathlib import Path
 import re
 import time
 import duckdb
-import pandas
 
 # ---------------------------------------------------------------------
 # Project Path Constants
@@ -11,10 +10,9 @@ BASE_DIR = Path(__file__).resolve().parent
 DUCKLAKE_FOLDER = BASE_DIR.parent / "ducklake"
 DUCKLAKE_DATA = DUCKLAKE_FOLDER / "data_files"
 DUCKLAKE_METADATA = DUCKLAKE_FOLDER / "metadata_catalog.ducklake"
-TEST_FOLDER = BASE_DIR.parent / "test"
 
-# Used for raw input data (webcrawls)
-PARQUET_FOLDER = BASE_DIR.parent / "parquet" 
+# Used for raw input data (web-crawl Parquet files)
+PARQUET_FOLDER = BASE_DIR.parent / "parquet"
 
 # ---------------------------------------------------------------------
 # DuckLake Attachment
@@ -76,7 +74,7 @@ def get_termid(con, term):
             [term],
         ).fetchone()
         return row[0] if row else None
-        
+
     except duckdb.IOException:
         # Handle transient read errors during massive updates/checkpoints
         return None
@@ -118,9 +116,9 @@ def initialise_data(con, parquet="*", limit=None):
     """
     con.execute("USE my_ducklake")
 
-    # FIX 1: Point directly to PARQUET_FOLDER, not a subfolder
+    # Resolve inputs relative to the top-level parquet/ folder.
     webcrawl_dir = PARQUET_FOLDER.resolve()
-    
+
     # If None or empty, default to "*"
     parquet_arg = str(parquet).strip() if parquet else "*"
 
@@ -156,10 +154,10 @@ def initialise_data(con, parquet="*", limit=None):
         FROM read_parquet(?)
         ORDER BY docid
     """
-    
-    # FIX 2: Explicitly type 'params' as list[object] to fix Pylance error
+
+    # Typed as list[object] so the optional integer LIMIT can be appended below.
     params: list[object] = [src]
-    
+
     if limit is not None:
         sql += " LIMIT ?"
         params.append(int(limit))
@@ -176,7 +174,7 @@ def import_data(con, parquet):
     """
     Upsert Parquet data into `my_ducklake.data`.
     """
-    # Standardized to use PARQUET_FOLDER constant
+    # Resolve the input file relative to the parquet/ folder.
     src = (PARQUET_FOLDER / parquet).resolve().as_posix()
 
     con.execute("USE my_ducklake")
@@ -206,9 +204,11 @@ def import_data(con, parquet):
 # ---------------------------------------------------------------------
 def checkpoint_rewrite(con):
     """
-    Implements all the ducklake maintenance functions bundled
+    Run DuckLake maintenance: rewrite data files with accumulated deletions,
+    then checkpoint. This compacts the Merge-on-Read delete files into fresh
+    Parquet data files and is timed so its cost can be reported.
     """
-    print(f"--- CHECKPOINT triggered ---")
+    print("--- CHECKPOINT triggered ---")
     start_ckpt = time.perf_counter()
     con.execute("""
                 -- delete_threshold => 0.01 instructs DuckLake to rewrite only data files

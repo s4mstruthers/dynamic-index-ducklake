@@ -2,6 +2,8 @@
 # BM25 query runners over DuckLake-backed index (dict/docs/postings).
 # Provides conjunctive (AND) and disjunctive (OR) semantics.
 
+import time
+
 from helper_functions import tokenize_query
 
 # ---------------------------------------------------------------------
@@ -19,7 +21,11 @@ def conjunctive_bm25(con, query, top_n):
     Returns:
       list[(docid:int, score:float)] ordered by descending score (<= top_n).
     """
-    termids = tokenize_query(con, query)
+    # De-duplicate termids while preserving order. This BM25 variant does not
+    # weight by query-term frequency, so repeating a query term must not change
+    # the result; left un-deduplicated, a repeat would also inflate the
+    # conjunctive "contains every term" count and wrongly exclude valid docs.
+    termids = list(dict.fromkeys(tokenize_query(con, query)))
     if not termids:
         return []
 
@@ -112,7 +118,11 @@ def disjunctive_bm25(con, query, top_n):
     Returns:
       list[(docid:int, score:float)] ordered by descending score (<= top_n).
     """
-    termids = tokenize_query(con, query)
+    # De-duplicate termids while preserving order. This BM25 variant does not
+    # weight by query-term frequency, so repeating a query term must not change
+    # the result; left un-deduplicated, a repeat would also inflate the
+    # conjunctive "contains every term" count and wrongly exclude valid docs.
+    termids = list(dict.fromkeys(tokenize_query(con, query)))
     if not termids:
         return []
 
@@ -184,8 +194,6 @@ def disjunctive_bm25(con, query, top_n):
 # ---------------------------------------------------------------------
 # Query Orchestration
 # ---------------------------------------------------------------------
-import time
-
 def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"):
     """
     Execute a BM25 query (conjunctive/disjunctive) and pretty-print results.
@@ -195,10 +203,7 @@ def run_bm25_query(con, query, top_n=10, show_content=False, qtype="disjunctive"
         - results: list[(docid:int, score:float)]
         - runtime_seconds: float (time spent executing BM25 SQL only)
     """
-    if qtype == "conjunctive":
-        from fts_tools import conjunctive_bm25 as bm25_runner
-    else:
-        from fts_tools import disjunctive_bm25 as bm25_runner
+    bm25_runner = conjunctive_bm25 if qtype == "conjunctive" else disjunctive_bm25
 
     # Measure ONLY the BM25 scoring SQL execution time
     start_time = time.perf_counter()

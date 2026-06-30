@@ -1,6 +1,5 @@
 # Core dependencies
-duckdb>=1.4.1  # DuckLake 1.0 catalog format requires this version or later
-numpy
-pyarrow
-pandas
-matplotlib
+duckdb>=1.4.1   # DuckLake 1.0 catalog format requires this version or later
+numpy           # numerical arrays used when building comparison plots
+pandas          # required at runtime by DuckDB's .fetch_df() (not imported directly)
+matplotlib      # performance and comparison plots
